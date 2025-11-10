@@ -33,40 +33,74 @@ async function detectPrinter(): Promise<string | null> {
     if (isWindows) {
       // PowerShell: Get first available printer (prefer default, then any available)
       try {
-        // First try to get default printer
-        const defaultCommand = `powershell -Command "$printer = Get-Printer | Where-Object {$_.Default -eq $true} | Select-Object -First 1; if ($printer) { $printer.Name }"`;
-        const { stdout: defaultStdout } = await execAsync(defaultCommand);
-        const defaultPrinter = defaultStdout.trim();
+        console.log('🔍 Attempting to detect printer on Windows...');
         
-        if (defaultPrinter && defaultPrinter.length > 0 && !defaultPrinter.includes('Get-Printer')) {
-          detectedPrinterName = defaultPrinter;
-          lastPrinterDetection = now;
-          console.log(`✅ Auto-detected default printer: ${defaultPrinter}`);
-          return defaultPrinter;
+        // First try to get default printer
+        const defaultCommand = `powershell -Command "$printer = Get-Printer | Where-Object {$_.Default -eq $true} | Select-Object -First 1; if ($printer) { Write-Output $printer.Name }"`;
+        try {
+          const { stdout: defaultStdout, stderr: defaultStderr } = await execAsync(defaultCommand);
+          const defaultPrinter = defaultStdout.trim();
+          console.log(`🔍 Default printer detection result: "${defaultPrinter}"`);
+          
+          if (defaultPrinter && defaultPrinter.length > 0 && !defaultPrinter.includes('Get-Printer') && !defaultPrinter.includes('Where-Object')) {
+            detectedPrinterName = defaultPrinter;
+            lastPrinterDetection = now;
+            console.log(`✅ Auto-detected default printer: ${defaultPrinter}`);
+            return defaultPrinter;
+          }
+        } catch (defaultError: any) {
+          console.log(`⚠️ Default printer detection failed: ${defaultError.message}`);
         }
         
         // If no default, get first available printer (any status)
-        const availableCommand = `powershell -Command "$printer = Get-Printer | Select-Object -First 1; if ($printer) { $printer.Name }"`;
-        const { stdout: availableStdout } = await execAsync(availableCommand);
-        const availablePrinter = availableStdout.trim();
-        
-        if (availablePrinter && availablePrinter.length > 0 && !availablePrinter.includes('Get-Printer')) {
-          detectedPrinterName = availablePrinter;
-          lastPrinterDetection = now;
-          console.log(`✅ Auto-detected printer: ${availablePrinter}`);
-          return availablePrinter;
+        const availableCommand = `powershell -Command "$printer = Get-Printer | Select-Object -First 1; if ($printer) { Write-Output $printer.Name }"`;
+        try {
+          const { stdout: availableStdout } = await execAsync(availableCommand);
+          const availablePrinter = availableStdout.trim();
+          console.log(`🔍 Available printer detection result: "${availablePrinter}"`);
+          
+          if (availablePrinter && availablePrinter.length > 0 && !availablePrinter.includes('Get-Printer') && !availablePrinter.includes('Select-Object')) {
+            detectedPrinterName = availablePrinter;
+            lastPrinterDetection = now;
+            console.log(`✅ Auto-detected printer: ${availablePrinter}`);
+            return availablePrinter;
+          }
+        } catch (availableError: any) {
+          console.log(`⚠️ Available printer detection failed: ${availableError.message}`);
         }
         
         // Try listing all printers with simpler command
-        const listCommand = `powershell -Command "Get-Printer | Select-Object -First 1 | ForEach-Object { $_.Name }"`;
-        const { stdout: listStdout } = await execAsync(listCommand);
-        const listPrinter = listStdout.trim();
+        const listCommand = `powershell -Command "Get-Printer | Select-Object -First 1 | ForEach-Object { Write-Output $_.Name }"`;
+        try {
+          const { stdout: listStdout } = await execAsync(listCommand);
+          const listPrinter = listStdout.trim();
+          console.log(`🔍 List printer detection result: "${listPrinter}"`);
+          
+          if (listPrinter && listPrinter.length > 0 && !listPrinter.includes('Get-Printer') && !listPrinter.includes('ForEach-Object')) {
+            detectedPrinterName = listPrinter;
+            lastPrinterDetection = now;
+            console.log(`✅ Auto-detected printer (list): ${listPrinter}`);
+            return listPrinter;
+          }
+        } catch (listError: any) {
+          console.log(`⚠️ List printer detection failed: ${listError.message}`);
+        }
         
-        if (listPrinter && listPrinter.length > 0 && !listPrinter.includes('Get-Printer')) {
-          detectedPrinterName = listPrinter;
-          lastPrinterDetection = now;
-          console.log(`✅ Auto-detected printer (list): ${listPrinter}`);
-          return listPrinter;
+        // Try even simpler command - just get all printer names
+        const simpleCommand = `powershell -Command "(Get-Printer).Name | Select-Object -First 1"`;
+        try {
+          const { stdout: simpleStdout } = await execAsync(simpleCommand);
+          const simplePrinter = simpleStdout.trim();
+          console.log(`🔍 Simple printer detection result: "${simplePrinter}"`);
+          
+          if (simplePrinter && simplePrinter.length > 0 && !simplePrinter.includes('Get-Printer') && !simplePrinter.includes('Select-Object')) {
+            detectedPrinterName = simplePrinter;
+            lastPrinterDetection = now;
+            console.log(`✅ Auto-detected printer (simple): ${simplePrinter}`);
+            return simplePrinter;
+          }
+        } catch (simpleError: any) {
+          console.log(`⚠️ Simple printer detection failed: ${simpleError.message}`);
         }
       } catch (error: any) {
         // If PowerShell fails on Windows, try wmic
@@ -142,16 +176,20 @@ async function detectPrinter(): Promise<string | null> {
 async function getPrinterName(): Promise<string> {
   // First, try environment variable
   if (process.env.PRINTER_NAME) {
+    console.log(`🖨️ Using printer from environment: ${process.env.PRINTER_NAME}`);
     return process.env.PRINTER_NAME;
   }
 
   // Try to detect automatically
+  console.log('🔍 No PRINTER_NAME in environment, attempting auto-detection...');
   const detected = await detectPrinter();
   if (detected) {
+    console.log(`✅ Using auto-detected printer: ${detected}`);
     return detected;
   }
 
   // Fallback to default (will be updated by auto-detection if printer is found)
+  console.log(`⚠️ No printer detected, using default: HP_Deskjet_525`);
   return 'HP_Deskjet_525';
 }
 

@@ -77,11 +77,26 @@ app.use((req, res) => {
 
 // Start server
 const HOST = process.env.HOST || '0.0.0.0'; // Listen on all interfaces for network access
-app.listen(PORT, HOST, () => {
+app.listen(PORT, HOST, async () => {
   console.log(`🖨️  Printer API server running on ${HOST}:${PORT}`);
   console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔑 API Key authentication: ${process.env.API_KEY ? 'Enabled' : 'Disabled'}`);
-  console.log(`🖨️  Printer: ${process.env.PRINTER_NAME || 'Not configured'}`);
+  
+  // Detect printer on startup
+  try {
+    const { checkPrinterStatus } = await import('./services/printer');
+    const printerStatus = await checkPrinterStatus();
+    const printerName = process.env.PRINTER_NAME || 'Auto-detecting...';
+    console.log(`🖨️  Printer: ${printerName}`);
+    console.log(`📊 Printer Status: ${printerStatus.available ? '✅ Available' : '❌ Not Available'} - ${printerStatus.message}`);
+    if (printerStatus.details) {
+      console.log(`ℹ️  Details: ${printerStatus.details}`);
+    }
+  } catch (error) {
+    console.log(`🖨️  Printer: ${process.env.PRINTER_NAME || 'Not configured'}`);
+    console.log(`⚠️  Could not check printer status on startup`);
+  }
+  
   console.log(`🌐 Local URL: http://localhost:${PORT}`);
   console.log(`🌐 Network URL: http://0.0.0.0:${PORT}`);
   console.log(`💡 To expose to internet, use ngrok: ngrok http ${PORT}`);
