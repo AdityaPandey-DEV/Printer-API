@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { print as printWithPdfToPrinter, getPrinters } from 'pdf-to-printer';
 import { generateFileNumberPage, generateLetterSeparator } from '../utils/printerUtils';
 import { shouldPrintLetterSeparator, getCurrentLetter, getCurrentFileNumber } from './deliveryNumber';
 
@@ -319,122 +320,61 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   const isMac = process.platform === 'darwin';
   const isLinux = process.platform === 'linux';
 
+  // Determine color mode, copies, page size, and sided based on printing options
+  const colorMode = options.color === 'color' ? 'color' : (options.color === 'mixed' ? 'mixed' : 'bw');
+  const copies = options.copies || 1;
+  const pageSize = options.pageSize || 'A4';
+  const sided = options.sided || 'single';
+  
+  const fileExt = path.extname(filePath).toLowerCase();
+
+  // For Windows: Use pdf-to-printer for PDFs and images, Word COM for DOCX
+  if (isWindows) {
+    if (fileExt === '.pdf' || fileExt === '.jpg' || fileExt === '.jpeg' || fileExt === '.png' || fileExt === '.gif' || fileExt === '.bmp') {
+      // Use pdf-to-printer directly (no command string needed)
+      try {
+        console.log(`🖨️ Printing ${fileExt} file using pdf-to-printer: ${filePath}`);
+        console.log(`📋 Options: printer=${printerName}, copies=${copies}, color=${colorMode}, pageSize=${pageSize}, sided=${sided}`);
+        
+        // Convert options to pdf-to-printer format
+        const printOptions: any = {
+          printer: printerName,
+          copies: copies,
+          monochrome: colorMode === 'bw',
+          paperSize: pageSize === 'A3' ? 'A3' : 'A4'
+        };
+        
+        // Add duplex if double-sided
+        if (sided === 'double') {
+          printOptions.duplex = 'duplexlong';
+        }
+        
+        // Print using pdf-to-printer
+        await printWithPdfToPrinter(filePath, printOptions);
+        console.log(`✅ Print job sent successfully using pdf-to-printer`);
+        
+        // Wait a bit for the print job to be queued
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        return; // Success, exit early
+      } catch (error: any) {
+        console.error(`❌ pdf-to-printer error: ${error.message}`);
+        throw new Error(`Print failed: ${error.message}`);
+      }
+    } else if (fileExt === '.docx' || fileExt === '.doc') {
+      // For DOCX: Use Word COM object (keep existing method)
+      // This will continue to the command-based approach below
+    }
+  }
+
+  // For other file types or platforms, use command-based approach
   let printCommand: string;
 
   if (isWindows) {
-    // Windows: Use application-based printing
-    // - PDFs: Use Chrome to print
-    // - DOCX: Use Word COM object to print
-    // - Images: Use Chrome or default viewer
+    // Windows: Use Word COM object for DOCX, default application for other types
     const escapedPrinterName = printerName.replace(/'/g, "''").replace(/\\/g, '\\\\');
     const escapedFilePath = filePath.replace(/'/g, "''").replace(/\\/g, '\\\\');
-    const fileExt = path.extname(filePath).toLowerCase();
     
-    // Determine color mode based on printing options
-    const colorMode = options.color === 'color' ? 'color' : (options.color === 'mixed' ? 'mixed' : 'bw');
-    const copies = options.copies || 1;
-    const pageSize = options.pageSize || 'A4';
-    const sided = options.sided || 'single';
-    
-    if (fileExt === '.pdf') {
-      // For PDFs: Use Chrome to open and print
-      const chromePaths = [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        (process.env.LOCALAPPDATA || '') + '\\Google\\Chrome\\Application\\chrome.exe'
-      ];
-      
-      // Try to find Chrome
-      let chromePath = '';
-      for (const chrome of chromePaths) {
-        if (chrome && fs.existsSync(chrome)) {
-          chromePath = chrome;
-          break;
-        }
-      }
-      
-      if (chromePath) {
-        // Use Chrome to open PDF, then use SendKeys to print with all options
-        // Convert Windows path to file:// URL format (fix double slashes)
-        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:').replace(/\/+/g, '/');
-        
-        // Build SendKeys sequence to configure print options
-        // Chrome print dialog: Use simpler navigation that's more reliable
-        // First, just get it working: Select printer → Print
-        // Then we can add options navigation
-        
-        // Escape printer name for SendKeys (special characters)
-        const printerNameForKeys = escapedPrinterName.replace(/'/g, "''");
-        
-        // Build SendKeys sequence
-        // 1. Open print dialog (Ctrl+P) - wait longer for dialog to fully load
-        // 2. Navigate to printer dropdown (usually first field or Tab a few times)
-        // 3. Type printer name to filter/select
-        // 4. Press Enter to select printer
-        // 5. Navigate to Print button (usually Tab or Enter)
-        // 6. Press Enter to print
-        
-        let sendKeysSequence = '';
-        
-        // 1. Open print dialog and wait for it to fully load
-        sendKeysSequence += "$wshell.SendKeys('^p'); Start-Sleep -Seconds 2; ";
-        
-        // 2. Navigate to printer selection - Chrome print dialog: Tab to printer dropdown
-        // Chrome's print dialog: First Tab goes to destination (printer), then Tab goes to pages, etc.
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to printer dropdown
-        sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 500; "; // Open dropdown
-        
-        // 3. Type printer name to filter (Chrome filters as you type)
-        sendKeysSequence += `$wshell.SendKeys('${printerNameForKeys}'); Start-Sleep -Milliseconds 1000; `;
-        
-        // 4. Select printer (Enter to select from filtered list)
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; ";
-        
-        // 5. Configure options if needed - navigate to More settings
-        if (colorMode === 'bw' || copies > 1 || pageSize === 'A3' || sided === 'double') {
-          // Navigate to More settings (usually Tab a few times or click)
-          // Chrome: Tab to "More settings" link, then Enter to expand
-          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; "; // Expand More settings
-          
-          // Color mode (if needed)
-          if (colorMode === 'bw') {
-            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-            sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; "; // Select Grayscale
-            sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-          }
-          
-          // Copies (if > 1)
-          if (copies > 1) {
-            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-            sendKeysSequence += "$wshell.SendKeys('^a'); Start-Sleep -Milliseconds 200; ";
-            sendKeysSequence += `$wshell.SendKeys('${copies}'); Start-Sleep -Milliseconds 500; `;
-          }
-        }
-        
-        // 6. Navigate to Print button - Chrome: Print button is usually at the bottom right
-        // Chrome print dialog: Cancel is on left, Print is on right
-        // After selecting printer, Tab usually goes to Cancel first, then Print
-        // We need to Tab to Cancel, then Tab again to Print, OR use Right arrow
-        // Let's try: Tab to Cancel, then Right arrow to move to Print button
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to Cancel (or first button)
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab again to Print (or use Right arrow if still on Cancel)
-        // If still on Cancel, use Right arrow to move to Print
-        // Actually, let's just use Right arrow after Tab to ensure we're on Print
-        sendKeysSequence += "$wshell.SendKeys('{RIGHT}'); Start-Sleep -Milliseconds 500; "; // Right arrow to move from Cancel to Print
-        
-        // 7. Click Print button (Enter or Space)
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 3; "; // Wait for print to start
-        
-        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${printerNameForKeys}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; ${sendKeysSequence}Stop-Process -Id $process.Id -Force"`;
-      } else {
-        // Fallback: Use default PDF viewer
-        printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
-      }
-    } else if (fileExt === '.docx' || fileExt === '.doc') {
+    if (fileExt === '.docx' || fileExt === '.doc') {
       // For DOCX: Use Word COM object to print with all options
       // Word.PrintOut parameters:
       // Background, Append, Range, OutputFileName, From, To, Item, Copies, Pages, PageType, PrintToFile, Collate, FileName, ActivePrinterMacGX, ManualDuplexPrint, PrintZoomColumn, PrintZoomRow, PrintZoomPaperWidth, PrintZoomPaperHeight
@@ -450,82 +390,6 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
       // Parameters: Background, Append, Range, OutputFileName, From, To, Item, Copies, Pages, PageType, PrintToFile, Collate, FileName, ActivePrinterMacGX, ManualDuplexPrint, PrintZoomColumn, PrintZoomRow, PrintZoomPaperWidth, PrintZoomPaperHeight
       const useColorStr = useColor ? '$true' : '$false';
       printCommand = `powershell -Command "$word = New-Object -ComObject Word.Application; $word.Visible = $false; $doc = $word.Documents.Open('${escapedFilePath}'); $word.ActivePrinter = '${escapedPrinterName}'; $word.Options.PrintBackgroundColors = ${useColorStr}; $word.Options.PrintBackgroundImages = ${useColorStr}; $word.Options.PrintInColor = ${useColorStr}; $doc.PrintOut([ref]$false, [ref]$false, [ref]0, [ref]'', [ref]0, [ref]0, [ref]0, [ref]${copies}, [ref]'', [ref]0, [ref]$false, [ref]$true, [ref]'', [ref]'', [ref]${duplexMode}, [ref]0, [ref]0, [ref]0, [ref]0); $doc.Close([ref]$false); $word.Quit([ref]$false)"`;
-    } else if (fileExt === '.jpg' || fileExt === '.jpeg' || fileExt === '.png' || fileExt === '.gif' || fileExt === '.bmp') {
-      // For images: Use Chrome to open and print
-      const chromePaths = [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        (process.env.LOCALAPPDATA || '') + '\\Google\\Chrome\\Application\\chrome.exe'
-      ];
-      
-      let chromePath = '';
-      for (const chrome of chromePaths) {
-        if (chrome && fs.existsSync(chrome)) {
-          chromePath = chrome;
-          break;
-        }
-      }
-      
-      if (chromePath) {
-        // Use Chrome to open image, then use SendKeys to print with all options
-        // Convert Windows path to file:// URL format (fix double slashes)
-        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:').replace(/\/+/g, '/');
-        
-        // Build SendKeys sequence (same as PDF)
-        const printerNameForKeys = escapedPrinterName.replace(/'/g, "''");
-        
-        let sendKeysSequence = '';
-        
-        // 1. Open print dialog and wait
-        sendKeysSequence += "$wshell.SendKeys('^p'); Start-Sleep -Seconds 2; ";
-        
-        // 2. Navigate to printer selection - Tab to printer dropdown
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to printer dropdown
-        sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 500; "; // Open dropdown
-        
-        // 3. Type printer name to filter
-        sendKeysSequence += `$wshell.SendKeys('${printerNameForKeys}'); Start-Sleep -Milliseconds 1000; `;
-        
-        // 4. Select printer
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; ";
-        
-        // 5. Configure options if needed - navigate to More settings
-        if (colorMode === 'bw' || copies > 1 || pageSize === 'A3' || sided === 'double') {
-          // Navigate to More settings
-          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; "; // Expand More settings
-          
-          if (colorMode === 'bw') {
-            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-            sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; ";
-            sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-          }
-          
-          if (copies > 1) {
-            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-            sendKeysSequence += "$wshell.SendKeys('^a'); Start-Sleep -Milliseconds 200; ";
-            sendKeysSequence += `$wshell.SendKeys('${copies}'); Start-Sleep -Milliseconds 500; `;
-          }
-        }
-        
-        // 6. Navigate to Print button - Chrome: Print button is usually at the bottom right
-        // After selecting printer, Tab usually goes to Cancel first, then Print
-        // Tab to Cancel, then Tab again to Print, OR use Right arrow
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to Cancel (or first button)
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab again to Print (or use Right arrow if still on Cancel)
-        sendKeysSequence += "$wshell.SendKeys('{RIGHT}'); Start-Sleep -Milliseconds 500; "; // Right arrow to move from Cancel to Print
-        
-        // 7. Click Print button
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 3; ";
-        
-        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${printerNameForKeys}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; ${sendKeysSequence}Stop-Process -Id $process.Id -Force"`;
-      } else {
-        // Fallback: Use default image viewer
-        printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
-      }
     } else {
       // For other file types: Try default application
       printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
