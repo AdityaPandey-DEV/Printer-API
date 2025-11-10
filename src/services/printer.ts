@@ -415,11 +415,16 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           }
         }
         
-        // 6. Navigate to Print button - Chrome: Print button is usually at the bottom
-        // Tab through to reach Print button (usually several Tabs)
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+        // 6. Navigate to Print button - Chrome: Print button is usually at the bottom right
+        // Chrome print dialog: Cancel is on left, Print is on right
+        // After selecting printer, Tab usually goes to Cancel first, then Print
+        // We need to Tab to Cancel, then Tab again to Print, OR use Right arrow
+        // Let's try: Tab to Cancel, then Right arrow to move to Print button
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to Cancel (or first button)
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab again to Print (or use Right arrow if still on Cancel)
+        // If still on Cancel, use Right arrow to move to Print
+        // Actually, let's just use Right arrow after Tab to ensure we're on Print
+        sendKeysSequence += "$wshell.SendKeys('{RIGHT}'); Start-Sleep -Milliseconds 500; "; // Right arrow to move from Cancel to Print
         
         // 7. Click Print button (Enter or Space)
         sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 3; "; // Wait for print to start
@@ -506,10 +511,12 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           }
         }
         
-        // 6. Navigate to Print button
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+        // 6. Navigate to Print button - Chrome: Print button is usually at the bottom right
+        // After selecting printer, Tab usually goes to Cancel first, then Print
+        // Tab to Cancel, then Tab again to Print, OR use Right arrow
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to Cancel (or first button)
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab again to Print (or use Right arrow if still on Cancel)
+        sendKeysSequence += "$wshell.SendKeys('{RIGHT}'); Start-Sleep -Milliseconds 500; "; // Right arrow to move from Cancel to Print
         
         // 7. Click Print button
         sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 3; ";
