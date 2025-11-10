@@ -8,6 +8,10 @@ export interface PrintJobData {
     sided: 'single' | 'double';
     copies: number;
     pageCount?: number;
+    pageColors?: {
+      colorPages: number[];
+      bwPages: number[];
+    };
   };
   deliveryNumber?: string;
   orderId?: string;

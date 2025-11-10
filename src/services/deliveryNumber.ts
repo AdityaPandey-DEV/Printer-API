@@ -20,7 +20,7 @@ interface DeliveryNumberState {
 let deliveryState: DeliveryNumberState = {
   currentLetter: process.env.DELIVERY_NUMBER_START || 'A',
   currentCount: 0,
-  currentFileNumber: 1, // Start at 1, not 0
+  currentFileNumber: 0, // Start at 0, will be incremented to 1 on first call
   totalFiles: 0,
   lastDate: getCurrentDateString()
 };
@@ -52,7 +52,8 @@ export function generateDeliveryNumber(printerIndex: number): string {
   if (currentDate !== deliveryState.lastDate) {
     deliveryState.currentLetter = process.env.DELIVERY_NUMBER_START || 'A';
     deliveryState.currentCount = 0;
-    deliveryState.currentFileNumber = 1; // Start at 1, not 0
+    deliveryState.currentFileNumber = 0; // Start at 0, will be incremented to 1
+    deliveryState.totalFiles = 0;
     deliveryState.lastDate = currentDate;
   }
 
@@ -61,21 +62,17 @@ export function generateDeliveryNumber(printerIndex: number): string {
   deliveryState.totalFiles++;
   
   // Increment file number (1-10)
-  // If file number is 0, start at 1, otherwise increment
-  if (deliveryState.currentFileNumber === 0 || deliveryState.currentFileNumber < 1) {
+  // File number cycles from 1 to 10, then resets to 1
+  deliveryState.currentFileNumber++;
+  if (deliveryState.currentFileNumber > 10) {
     deliveryState.currentFileNumber = 1;
-  } else {
-    deliveryState.currentFileNumber++;
-    if (deliveryState.currentFileNumber > 10) {
-      deliveryState.currentFileNumber = 1;
-    }
   }
 
-  // Move to next letter after 10 files
+  // Move to next letter after 10 files (when count reaches 11, we've done 10 files)
   if (deliveryState.currentCount > 10) {
     deliveryState.currentLetter = getNextLetter(deliveryState.currentLetter);
-    deliveryState.currentCount = 1;
-    deliveryState.currentFileNumber = 1; // Reset file number for new letter
+    deliveryState.currentCount = 1; // Reset count to 1 (this is the first file of the new letter)
+    // File number continues from where it was (1-10 cycle), don't reset it
   }
 
   // Format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}{FILE_NUMBER}

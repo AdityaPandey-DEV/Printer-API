@@ -39,7 +39,9 @@ router.post('/print', async (req: Request, res: Response) => {
         pageSize: jobData.printingOptions?.pageSize || 'A4',
         color: jobData.printingOptions?.color || 'bw',
         sided: jobData.printingOptions?.sided || 'single',
-        copies: jobData.printingOptions?.copies || 1
+        copies: jobData.printingOptions?.copies || 1,
+        pageCount: jobData.printingOptions?.pageCount,
+        pageColors: jobData.printingOptions?.pageColors
       },
       deliveryNumber
     };
