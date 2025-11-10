@@ -1,7 +1,7 @@
 /**
  * Delivery Number Generation Service
- * Format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}
- * Example: A202501151 = Letter A, Date 2025-01-15, Printer Index 1
+ * Format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}{FILE_NUMBER}
+ * Example: A2025011511 = Letter A, Date 2025-01-15, Printer Index 1, File Number 1
  * 
  * Logic:
  * - A-Z cycles every 260 files (10 files per letter × 26 letters)
@@ -43,7 +43,7 @@ function getNextLetter(currentLetter: string): string {
 /**
  * Generate delivery number for a print job
  * @param printerIndex - Index of the printer (from PRINTER_API_URLS array)
- * @returns Delivery number in format {LETTER}{YYYYMMDD}{PRINTER_INDEX}
+ * @returns Delivery number in format {LETTER}{YYYYMMDD}{PRINTER_INDEX}{FILE_NUMBER}
  */
 export function generateDeliveryNumber(printerIndex: number): string {
   const currentDate = getCurrentDateString();
@@ -73,10 +73,10 @@ export function generateDeliveryNumber(printerIndex: number): string {
     deliveryState.currentFileNumber = 1; // Reset file number for new letter
   }
 
-  // Format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}
-  const deliveryNumber = `${deliveryState.currentLetter}${currentDate}${printerIndex}`;
+  // Format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}{FILE_NUMBER}
+  const deliveryNumber = `${deliveryState.currentLetter}${currentDate}${printerIndex}${deliveryState.currentFileNumber}`;
   
-  console.log(`Generated delivery number: ${deliveryNumber} (Letter: ${deliveryState.currentLetter}, Count: ${deliveryState.currentCount}, Total: ${deliveryState.totalFiles})`);
+  console.log(`Generated delivery number: ${deliveryNumber} (Letter: ${deliveryState.currentLetter}, File Number: ${deliveryState.currentFileNumber}, Count: ${deliveryState.currentCount}, Total: ${deliveryState.totalFiles})`);
   
   return deliveryNumber;
 }
