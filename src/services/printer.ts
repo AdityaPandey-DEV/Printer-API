@@ -309,63 +309,110 @@ async function tryFallbackPrintMethod(filePath: string, printerName: string, opt
 }
 
 /**
- * Split PDF into color and B&W pages for mixed color printing
+ * Print PDF with mixed color pages in sequence (maintains page order)
  */
-async function splitPdfForMixedColor(pdfPath: string, colorPages: number[], bwPages: number[], tempDir: string): Promise<{ colorPdfPath: string | null; bwPdfPath: string | null }> {
+async function printPdfWithMixedColorInSequence(
+  pdfPath: string,
+  colorPages: number[],
+  bwPages: number[],
+  printerName: string,
+  copies: number,
+  pageSize: 'A4' | 'A3',
+  sided: 'single' | 'double',
+  tempDir: string
+): Promise<void> {
   try {
     const pdfBytes = fs.readFileSync(pdfPath);
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const totalPages = pdfDoc.getPageCount();
     
     // Convert 1-based page numbers to 0-based indices
-    const colorIndices = colorPages.map(p => p - 1).filter(i => i >= 0 && i < totalPages);
-    const bwIndices = bwPages.map(p => p - 1).filter(i => i >= 0 && i < totalPages);
+    const colorIndices = new Set(colorPages.map(p => p - 1).filter(i => i >= 0 && i < totalPages));
+    const bwIndices = new Set(bwPages.map(p => p - 1).filter(i => i >= 0 && i < totalPages));
     
-    // Determine unspecified pages (default to B&W)
-    const allSpecifiedIndices = [...new Set([...colorIndices, ...bwIndices])];
-    const unspecifiedIndices: number[] = [];
+    // Determine page color mode for each page (default to B&W if unspecified)
+    const pageColorMode: Map<number, boolean> = new Map();
     for (let i = 0; i < totalPages; i++) {
-      if (!allSpecifiedIndices.includes(i)) {
-        unspecifiedIndices.push(i);
+      if (colorIndices.has(i)) {
+        pageColorMode.set(i, false); // false = color
+      } else {
+        pageColorMode.set(i, true); // true = monochrome (B&W)
       }
     }
     
-    // Add unspecified pages to B&W
-    const allBwIndices = [...new Set([...bwIndices, ...unspecifiedIndices])];
+    // Group consecutive pages with the same color mode to minimize print jobs
+    const pageGroups: Array<{ startIndex: number; endIndex: number; isMonochrome: boolean }> = [];
+    let currentGroup: { startIndex: number; endIndex: number; isMonochrome: boolean } | null = null;
     
-    let colorPdfPath: string | null = null;
-    let bwPdfPath: string | null = null;
-    
-    // Create color PDF if there are color pages
-    if (colorIndices.length > 0) {
-      const colorPdf = await PDFDocument.create();
-      for (const index of colorIndices) {
-        const [copiedPage] = await colorPdf.copyPages(pdfDoc, [index]);
-        colorPdf.addPage(copiedPage);
+    for (let i = 0; i < totalPages; i++) {
+      const isMonochrome = pageColorMode.get(i) || true;
+      
+      if (currentGroup === null) {
+        // Start new group
+        currentGroup = { startIndex: i, endIndex: i, isMonochrome };
+      } else if (currentGroup.isMonochrome === isMonochrome) {
+        // Extend current group
+        currentGroup.endIndex = i;
+      } else {
+        // Save current group and start new one
+        pageGroups.push(currentGroup);
+        currentGroup = { startIndex: i, endIndex: i, isMonochrome };
       }
-      const colorPdfBytes = await colorPdf.save();
-      colorPdfPath = path.join(tempDir, `color_${Date.now()}.pdf`);
-      fs.writeFileSync(colorPdfPath, colorPdfBytes);
-      console.log(`✅ Created color PDF with ${colorIndices.length} pages: ${colorPdfPath}`);
     }
     
-    // Create B&W PDF if there are B&W pages
-    if (allBwIndices.length > 0) {
-      const bwPdf = await PDFDocument.create();
-      for (const index of allBwIndices) {
-        const [copiedPage] = await bwPdf.copyPages(pdfDoc, [index]);
-        bwPdf.addPage(copiedPage);
-      }
-      const bwPdfBytes = await bwPdf.save();
-      bwPdfPath = path.join(tempDir, `bw_${Date.now()}.pdf`);
-      fs.writeFileSync(bwPdfPath, bwPdfBytes);
-      console.log(`✅ Created B&W PDF with ${allBwIndices.length} pages: ${bwPdfPath}`);
+    // Add last group
+    if (currentGroup !== null) {
+      pageGroups.push(currentGroup);
     }
     
-    return { colorPdfPath, bwPdfPath };
+    console.log(`📋 Printing ${totalPages} pages in ${pageGroups.length} groups to maintain sequence`);
+    
+    // Print each group in order
+    for (let groupIndex = 0; groupIndex < pageGroups.length; groupIndex++) {
+      const group = pageGroups[groupIndex];
+      const pageCount = group.endIndex - group.startIndex + 1;
+      
+      // Create PDF for this group
+      const groupPdf = await PDFDocument.create();
+      for (let i = group.startIndex; i <= group.endIndex; i++) {
+        const [copiedPage] = await groupPdf.copyPages(pdfDoc, [i]);
+        groupPdf.addPage(copiedPage);
+      }
+      
+      const groupPdfBytes = await groupPdf.save();
+      const groupPdfPath = path.join(tempDir, `group_${groupIndex}_${group.isMonochrome ? 'bw' : 'color'}_${Date.now()}.pdf`);
+      fs.writeFileSync(groupPdfPath, groupPdfBytes);
+      
+      console.log(`🖨️ Printing pages ${group.startIndex + 1}-${group.endIndex + 1} (${group.isMonochrome ? 'B&W' : 'Color'})...`);
+      
+      // Print with appropriate color setting
+      const printOptions: any = {
+        printer: printerName,
+        copies: copies,
+        monochrome: group.isMonochrome,
+        paperSize: pageSize === 'A3' ? 'A3' : 'A4'
+      };
+      
+      if (sided === 'double') {
+        printOptions.duplex = 'duplexlong';
+      }
+      
+      await printWithPdfToPrinter(groupPdfPath, printOptions);
+      console.log(`✅ Pages ${group.startIndex + 1}-${group.endIndex + 1} printed successfully`);
+      
+      // Cleanup
+      fs.unlinkSync(groupPdfPath);
+      
+      // Small delay between groups to ensure proper sequencing
+      if (groupIndex < pageGroups.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    console.log(`✅ All pages printed in correct sequence`);
   } catch (error: any) {
-    console.error(`❌ Error splitting PDF for mixed color: ${error.message}`);
-    throw new Error(`Failed to split PDF for mixed color printing: ${error.message}`);
+    console.error(`❌ Error printing PDF with mixed color in sequence: ${error.message}`);
+    throw new Error(`Failed to print PDF with mixed color in sequence: ${error.message}`);
   }
 }
 
@@ -398,10 +445,10 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   // For Windows: Use pdf-to-printer for PDFs and images, Word COM for DOCX
   if (isWindows) {
     if (fileExt === '.pdf' || fileExt === '.jpg' || fileExt === '.jpeg' || fileExt === '.png' || fileExt === '.gif' || fileExt === '.bmp') {
-      // Handle mixed color printing for PDFs
+      // Handle mixed color printing for PDFs (maintains page sequence)
       if (fileExt === '.pdf' && colorMode === 'mixed' && options.pageColors) {
         try {
-          console.log(`🖨️ Printing PDF with mixed color mode`);
+          console.log(`🖨️ Printing PDF with mixed color mode (maintaining page sequence)`);
           console.log(`📋 Color pages: ${options.pageColors.colorPages.join(', ')}`);
           console.log(`📋 B&W pages: ${options.pageColors.bwPages.join(', ')}`);
           
@@ -411,51 +458,17 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
             fs.mkdirSync(tempDir, { recursive: true });
           }
           
-          // Split PDF into color and B&W pages
-          const { colorPdfPath, bwPdfPath } = await splitPdfForMixedColor(
+          // Print PDF with mixed color pages in sequence
+          await printPdfWithMixedColorInSequence(
             filePath,
             options.pageColors.colorPages,
             options.pageColors.bwPages,
+            printerName,
+            copies,
+            pageSize,
+            sided,
             tempDir
           );
-          
-          // Print color pages
-          if (colorPdfPath) {
-            console.log(`🖨️ Printing color pages...`);
-            const colorPrintOptions: any = {
-              printer: printerName,
-              copies: copies,
-              monochrome: false, // Color printing
-              paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-            };
-            if (sided === 'double') {
-              colorPrintOptions.duplex = 'duplexlong';
-            }
-            await printWithPdfToPrinter(colorPdfPath, colorPrintOptions);
-            console.log(`✅ Color pages printed successfully`);
-            
-            // Cleanup
-            fs.unlinkSync(colorPdfPath);
-          }
-          
-          // Print B&W pages
-          if (bwPdfPath) {
-            console.log(`🖨️ Printing B&W pages...`);
-            const bwPrintOptions: any = {
-              printer: printerName,
-              copies: copies,
-              monochrome: true, // B&W printing
-              paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-            };
-            if (sided === 'double') {
-              bwPrintOptions.duplex = 'duplexlong';
-            }
-            await printWithPdfToPrinter(bwPdfPath, bwPrintOptions);
-            console.log(`✅ B&W pages printed successfully`);
-            
-            // Cleanup
-            fs.unlinkSync(bwPdfPath);
-          }
           
           // Wait a bit for the print jobs to be queued
           await new Promise(resolve => setTimeout(resolve, 2000));
