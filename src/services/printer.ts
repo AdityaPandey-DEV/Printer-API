@@ -251,6 +251,57 @@ async function downloadFile(url: string, outputPath: string): Promise<void> {
 }
 
 /**
+ * Fallback print method using rundll32 to set default printer, then print
+ */
+async function tryFallbackPrintMethod(filePath: string, printerName: string, options: PrintJob['printingOptions']): Promise<void> {
+  console.log(`🔄 Using fallback print method: rundll32 + Start-Process`);
+  
+  const escapedPrinterName = printerName.replace(/"/g, '\\"');
+  const escapedFilePath = filePath.replace(/"/g, '\\"');
+  
+  // Set printer as default using rundll32
+  const setDefaultCmd = `rundll32 printui.dll,PrintUIEntry /y /n "${escapedPrinterName}"`;
+  // Print using Start-Process with Print verb (now uses default)
+  const printCmd = `powershell -Command "Start-Process -FilePath '${escapedFilePath}' -Verb Print -WindowStyle Hidden -ErrorAction Stop"`;
+  
+  const fallbackCommand = `${setDefaultCmd} && ${printCmd}`;
+  
+  console.log(`Executing fallback print command: ${fallbackCommand}`);
+  
+  try {
+    const { stdout, stderr } = await execAsync(fallbackCommand);
+    
+    if (stdout) {
+      const stdoutTrimmed = stdout.trim();
+      if (stdoutTrimmed) {
+        console.log(`✅ Fallback print command output: ${stdoutTrimmed}`);
+      }
+    }
+    
+    if (stderr) {
+      const stderrTrimmed = stderr.trim();
+      const stderrLower = stderrTrimmed.toLowerCase();
+      
+      if (stderrLower.includes('error') || stderrLower.includes('exception') || stderrLower.includes('failed')) {
+        console.error(`❌ Fallback print command error: ${stderrTrimmed}`);
+        throw new Error(`Fallback print method failed: ${stderrTrimmed}`);
+      }
+      
+      if (stderrTrimmed && !stderrLower.includes('request id')) {
+        console.warn('Fallback print command stderr:', stderrTrimmed);
+      }
+    }
+    
+    // Wait a bit for the print job to be queued
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  } catch (fallbackError: any) {
+    const fallbackErrorMessage = fallbackError.message || fallbackError.stdout || fallbackError.stderr || String(fallbackError);
+    console.error(`❌ Fallback print method also failed: ${fallbackErrorMessage}`);
+    throw new Error(`Both COM object and fallback print methods failed. Last error: ${fallbackErrorMessage}`);
+  }
+}
+
+/**
  * Print file using system printer command
  */
 async function printFile(filePath: string, options: PrintJob['printingOptions']): Promise<void> {
@@ -271,18 +322,20 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   let printCommand: string;
 
   if (isWindows) {
-    // Windows: Use PowerShell to print - more reliable than print command
+    // Windows: Use PowerShell COM objects (Shell.Application) to print files
+    // This method works with all file types and doesn't require changing default printer
     // Escape single quotes and backslashes for PowerShell
     const escapedPrinterName = printerName.replace(/'/g, "''").replace(/\\/g, '\\\\');
     const escapedFilePath = filePath.replace(/'/g, "''").replace(/\\/g, '\\\\');
     
-    // Use PowerShell to print using the Windows Print Spooler API
-    // This method works with all file types and specific printer names
-    const fileExt = path.extname(filePath).toLowerCase();
+    // Get directory and filename separately for Shell.Application
+    const fileDir = path.dirname(escapedFilePath).replace(/\\/g, '/');
+    const fileName = path.basename(escapedFilePath);
     
-    // Use PowerShell to print via the default application for the file type
-    // Set the printer as default temporarily, print, then restore
-    printCommand = `powershell -Command "$printer = '${escapedPrinterName}'; $file = '${escapedFilePath}'; $oldDefault = (Get-Printer | Where-Object {$_.Default -eq $true}).Name; Set-Printer -Name $printer -Default; Start-Sleep -Milliseconds 500; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden -ErrorAction Stop; Start-Sleep -Seconds 2; if ($oldDefault -and $oldDefault -ne $printer) { Set-Printer -Name $oldDefault -Default }"`;
+    // Primary method: Use Shell.Application COM object to print to specific printer
+    // This works with PDFs, images, and all file types that Windows can print
+    // Method: Use InvokeVerbEx with 'printto' verb and printer name
+    printCommand = `powershell -Command "$shell = New-Object -ComObject Shell.Application; $folder = $shell.NameSpace('${fileDir}'); $file = $folder.ParseName('${fileName}'); $file.InvokeVerbEx('printto', '${escapedPrinterName}')"`;
   } else if (isMac) {
     // macOS: Use lp command
     const copies = options.copies || 1;
@@ -302,13 +355,24 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   try {
     const { stdout, stderr } = await execAsync(printCommand);
     
-    // PowerShell Start-Process with PrintTo typically doesn't output much
+    // Shell.Application COM object typically doesn't output much
     // If there's output, check for errors
     if (stdout) {
       const stdoutLower = stdout.toLowerCase();
       const stdoutTrimmed = stdout.trim();
       
-      // Check for error messages
+      // Check for COM object errors
+      if (stdoutLower.includes('new-object') && stdoutLower.includes('cannot create type')) {
+        console.error(`❌ COM object error detected in stdout: ${stdoutTrimmed}`);
+        throw new Error(`COM object error: Shell.Application not available. ${stdoutTrimmed}`);
+      }
+      
+      if (stdoutLower.includes('invokeverbex') && (stdoutLower.includes('method invocation failed') || stdoutLower.includes('exception'))) {
+        console.error(`❌ Print verb error detected in stdout: ${stdoutTrimmed}`);
+        throw new Error(`Print verb failed: ${stdoutTrimmed || 'Unable to invoke print verb'}`);
+      }
+      
+      // Check for general printer errors
       if (stdoutLower.includes('unable to initialize device') ||
           stdoutLower.includes('unable to connect') ||
           stdoutLower.includes('printer not found') ||
@@ -316,8 +380,8 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           stdoutLower.includes('device not found') ||
           stdoutLower.includes('cannot connect to printer') ||
           stdoutLower.includes('cannot find') ||
-          stdoutLower.includes('error') ||
-          stdoutLower.includes('exception')) {
+          (stdoutLower.includes('error') && !stdoutLower.includes('request id')) ||
+          (stdoutLower.includes('exception') && !stdoutLower.includes('request id'))) {
         console.error(`❌ Printer error detected in stdout: ${stdoutTrimmed}`);
         throw new Error(`Printer error: ${stdoutTrimmed || 'Unable to print'}`);
       }
@@ -332,14 +396,25 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
       const stderrLower = stderr.toLowerCase();
       const stderrTrimmed = stderr.trim();
       
+      // COM object specific errors
+      if (stderrLower.includes('new-object') && (stderrLower.includes('cannot create type') || stderrLower.includes('comobject'))) {
+        console.error(`❌ COM object error detected in stderr: ${stderrTrimmed}`);
+        throw new Error(`COM object error: Shell.Application not available. ${stderrTrimmed}`);
+      }
+      
+      if (stderrLower.includes('invokeverbex') && (stderrLower.includes('method invocation failed') || stderrLower.includes('exception'))) {
+        console.error(`❌ Print verb error detected in stderr: ${stderrTrimmed}`);
+        throw new Error(`Print verb failed: ${stderrTrimmed || 'Unable to invoke print verb'}`);
+      }
+      
       // Common printer error messages
       if (stderrLower.includes('unable to connect') || 
           stderrLower.includes('printer not found') ||
           stderrLower.includes('no such file or directory') ||
           stderrLower.includes('printer does not exist') ||
           stderrLower.includes('cannot find') ||
-          stderrLower.includes('error') ||
-          stderrLower.includes('exception')) {
+          (stderrLower.includes('error') && !stderrLower.includes('request id')) ||
+          (stderrLower.includes('exception') && !stderrLower.includes('request id'))) {
         console.error(`❌ Printer error detected in stderr: ${stderrTrimmed}`);
         throw new Error(`Printer error: ${stderrTrimmed || 'Unable to print'}`);
       }
@@ -357,16 +432,27 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
       }
     }
     
-    // For PowerShell Start-Process, if no error, assume success
+    // For Shell.Application COM object, if no error, assume success
     // Wait a bit for the print job to be queued
     await new Promise(resolve => setTimeout(resolve, 2000));
   } catch (error: any) {
     // Check if it's a printer-related error
-    // Windows print command may output errors to stdout, so check both stdout and stderr
+    // Shell.Application COM object may output errors to stdout or stderr
     const errorMessage = error.message || error.stdout || error.stderr || String(error);
     const errorLower = errorMessage.toLowerCase();
     
-    // Detect specific printer errors (including Windows stdout errors)
+    // Detect COM object errors and try fallback method
+    if (errorLower.includes('new-object') && (errorLower.includes('cannot create type') || errorLower.includes('comobject'))) {
+      console.warn('⚠️ COM object method failed, trying fallback method...');
+      return await tryFallbackPrintMethod(filePath, printerName, options);
+    }
+    
+    if (errorLower.includes('invokeverbex') && (errorLower.includes('method invocation failed') || errorLower.includes('exception'))) {
+      console.warn('⚠️ Print verb failed, trying fallback method...');
+      return await tryFallbackPrintMethod(filePath, printerName, options);
+    }
+    
+    // Detect specific printer errors
     if (errorLower.includes('unable to initialize device') ||
         errorLower.includes('unable to connect') ||
         errorLower.includes('printer not found') ||
