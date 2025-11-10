@@ -3,8 +3,12 @@ import { addToQueue, getQueueStatus } from '../services/queue';
 import { generateDeliveryNumber } from '../services/deliveryNumber';
 import { checkPrinterStatus } from '../services/printer';
 import { PrintJobData } from '../models/PrintJob';
+import { authenticateApiKey } from '../utils/auth';
 
 const router = Router();
+
+// Apply authentication to all routes
+router.use(authenticateApiKey);
 
 /**
  * POST /api/print
