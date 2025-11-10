@@ -34,39 +34,39 @@ async function detectPrinter(): Promise<string | null> {
       // PowerShell: Get first available printer (prefer default, then any available)
       try {
         // First try to get default printer
-        const defaultCommand = `powershell -Command "Get-Printer | Where-Object {$_.Default -eq $true} | Select-Object -First 1 -ExpandProperty Name"`;
+        const defaultCommand = `powershell -Command "$printer = Get-Printer | Where-Object {$_.Default -eq $true} | Select-Object -First 1; if ($printer) { $printer.Name }"`;
         const { stdout: defaultStdout } = await execAsync(defaultCommand);
         const defaultPrinter = defaultStdout.trim();
         
-        if (defaultPrinter && defaultPrinter.length > 0) {
+        if (defaultPrinter && defaultPrinter.length > 0 && !defaultPrinter.includes('Get-Printer')) {
           detectedPrinterName = defaultPrinter;
           lastPrinterDetection = now;
           console.log(`✅ Auto-detected default printer: ${defaultPrinter}`);
           return defaultPrinter;
         }
         
-        // If no default, get first available printer
-        const availableCommand = `powershell -Command "Get-Printer | Where-Object {$_.PrinterStatus -eq 'Normal' -or $_.PrinterStatus -eq 'Idle' -or $_.PrinterStatus -eq 'Unknown'} | Select-Object -First 1 -ExpandProperty Name"`;
+        // If no default, get first available printer (any status)
+        const availableCommand = `powershell -Command "$printer = Get-Printer | Select-Object -First 1; if ($printer) { $printer.Name }"`;
         const { stdout: availableStdout } = await execAsync(availableCommand);
         const availablePrinter = availableStdout.trim();
         
-        if (availablePrinter && availablePrinter.length > 0) {
+        if (availablePrinter && availablePrinter.length > 0 && !availablePrinter.includes('Get-Printer')) {
           detectedPrinterName = availablePrinter;
           lastPrinterDetection = now;
-          console.log(`✅ Auto-detected available printer: ${availablePrinter}`);
+          console.log(`✅ Auto-detected printer: ${availablePrinter}`);
           return availablePrinter;
         }
         
-        // If still no printer, get any printer
-        const anyCommand = `powershell -Command "Get-Printer | Select-Object -First 1 -ExpandProperty Name"`;
-        const { stdout: anyStdout } = await execAsync(anyCommand);
-        const anyPrinter = anyStdout.trim();
+        // Try listing all printers with simpler command
+        const listCommand = `powershell -Command "Get-Printer | Select-Object -First 1 | ForEach-Object { $_.Name }"`;
+        const { stdout: listStdout } = await execAsync(listCommand);
+        const listPrinter = listStdout.trim();
         
-        if (anyPrinter && anyPrinter.length > 0) {
-          detectedPrinterName = anyPrinter;
+        if (listPrinter && listPrinter.length > 0 && !listPrinter.includes('Get-Printer')) {
+          detectedPrinterName = listPrinter;
           lastPrinterDetection = now;
-          console.log(`✅ Auto-detected printer: ${anyPrinter}`);
-          return anyPrinter;
+          console.log(`✅ Auto-detected printer (list): ${listPrinter}`);
+          return listPrinter;
         }
       } catch (error: any) {
         // If PowerShell fails on Windows, try wmic
@@ -227,8 +227,14 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   let printCommand: string;
 
   if (isWindows) {
-    // Windows: Use print command or PowerShell
-    printCommand = `print /D:"${printerName}" "${filePath}"`;
+    // Windows: Use print command with proper escaping for printer names with spaces
+    // The print command requires quotes around the printer name and file path
+    // Escape quotes in printer name and file path
+    const escapedPrinterName = printerName.replace(/"/g, '\\"');
+    const escapedFilePath = filePath.replace(/"/g, '\\"');
+    
+    // Use the Windows print command - it handles printer names with spaces when properly quoted
+    printCommand = `print /D:"${escapedPrinterName}" "${escapedFilePath}"`;
   } else if (isMac) {
     // macOS: Use lp command
     const copies = options.copies || 1;
