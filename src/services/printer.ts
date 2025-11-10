@@ -100,6 +100,32 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   try {
     const { stdout, stderr } = await execAsync(printCommand);
     
+    // Check for printer errors in stdout (Windows print command outputs errors to stdout)
+    if (stdout) {
+      const stdoutLower = stdout.toLowerCase();
+      
+      // Windows-specific printer error messages in stdout
+      if (stdoutLower.includes('unable to initialize device') ||
+          stdoutLower.includes('unable to connect') ||
+          stdoutLower.includes('printer not found') ||
+          stdoutLower.includes('printer does not exist') ||
+          stdoutLower.includes('device not found') ||
+          stdoutLower.includes('cannot connect to printer')) {
+        throw new Error(`Printer not connected or not found: ${printerName}`);
+      }
+      
+      if (stdoutLower.includes('printer is not available') ||
+          stdoutLower.includes('printer is offline') ||
+          stdoutLower.includes('printer is stopped') ||
+          stdoutLower.includes('printer is disabled')) {
+        throw new Error(`Printer is offline or not available: ${printerName}`);
+      }
+      
+      if (stdoutLower.includes('power') && stdoutLower.includes('off')) {
+        throw new Error(`Printer appears to be powered off: ${printerName}`);
+      }
+    }
+    
     // Check for printer errors in stderr
     if (stderr) {
       const stderrLower = stderr.toLowerCase();
@@ -132,21 +158,26 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
     console.log('Print command stdout:', stdout);
   } catch (error: any) {
     // Check if it's a printer-related error
-    const errorMessage = error.message || error.stderr || String(error);
+    // Windows print command may output errors to stdout, so check both stdout and stderr
+    const errorMessage = error.message || error.stdout || error.stderr || String(error);
     const errorLower = errorMessage.toLowerCase();
     
-    // Detect specific printer errors
-    if (errorLower.includes('unable to connect') ||
+    // Detect specific printer errors (including Windows stdout errors)
+    if (errorLower.includes('unable to initialize device') ||
+        errorLower.includes('unable to connect') ||
         errorLower.includes('printer not found') ||
         errorLower.includes('no such file or directory') ||
-        errorLower.includes('printer does not exist')) {
+        errorLower.includes('printer does not exist') ||
+        errorLower.includes('device not found') ||
+        errorLower.includes('cannot connect to printer')) {
       throw new Error(`Printer not connected: ${printerName}. Please check USB connection.`);
     }
     
     if (errorLower.includes('printer is not available') ||
         errorLower.includes('printer is offline') ||
         errorLower.includes('printer is idle') ||
-        errorLower.includes('printer is stopped')) {
+        errorLower.includes('printer is stopped') ||
+        errorLower.includes('printer is disabled')) {
       throw new Error(`Printer is offline: ${printerName}. Please turn on the printer.`);
     }
     
