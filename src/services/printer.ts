@@ -7,6 +7,154 @@ import { shouldPrintLetterSeparator, getCurrentLetter, getCurrentFileNumber } fr
 
 const execAsync = promisify(exec);
 
+// Cache for detected printer name
+let detectedPrinterName: string | null = null;
+let lastPrinterDetection: number = 0;
+const PRINTER_DETECTION_CACHE_MS = 60000; // Cache for 1 minute
+
+/**
+ * Detect available printers automatically
+ */
+async function detectPrinter(): Promise<string | null> {
+  const now = Date.now();
+  
+  // Return cached printer if still valid
+  if (detectedPrinterName && (now - lastPrinterDetection) < PRINTER_DETECTION_CACHE_MS) {
+    return detectedPrinterName;
+  }
+
+  try {
+    const isWindows = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const isLinux = process.platform === 'linux';
+
+    let listCommand: string;
+
+    if (isWindows) {
+      // PowerShell: Get first available printer (prefer default, then any available)
+      try {
+        // First try to get default printer
+        const defaultCommand = `powershell -Command "Get-Printer | Where-Object {$_.Default -eq $true} | Select-Object -First 1 -ExpandProperty Name"`;
+        const { stdout: defaultStdout } = await execAsync(defaultCommand);
+        const defaultPrinter = defaultStdout.trim();
+        
+        if (defaultPrinter && defaultPrinter.length > 0) {
+          detectedPrinterName = defaultPrinter;
+          lastPrinterDetection = now;
+          console.log(`✅ Auto-detected default printer: ${defaultPrinter}`);
+          return defaultPrinter;
+        }
+        
+        // If no default, get first available printer
+        const availableCommand = `powershell -Command "Get-Printer | Where-Object {$_.PrinterStatus -eq 'Normal' -or $_.PrinterStatus -eq 'Idle' -or $_.PrinterStatus -eq 'Unknown'} | Select-Object -First 1 -ExpandProperty Name"`;
+        const { stdout: availableStdout } = await execAsync(availableCommand);
+        const availablePrinter = availableStdout.trim();
+        
+        if (availablePrinter && availablePrinter.length > 0) {
+          detectedPrinterName = availablePrinter;
+          lastPrinterDetection = now;
+          console.log(`✅ Auto-detected available printer: ${availablePrinter}`);
+          return availablePrinter;
+        }
+        
+        // If still no printer, get any printer
+        const anyCommand = `powershell -Command "Get-Printer | Select-Object -First 1 -ExpandProperty Name"`;
+        const { stdout: anyStdout } = await execAsync(anyCommand);
+        const anyPrinter = anyStdout.trim();
+        
+        if (anyPrinter && anyPrinter.length > 0) {
+          detectedPrinterName = anyPrinter;
+          lastPrinterDetection = now;
+          console.log(`✅ Auto-detected printer: ${anyPrinter}`);
+          return anyPrinter;
+        }
+      } catch (error: any) {
+        // If PowerShell fails on Windows, try wmic
+        if (isWindows) {
+          try {
+            const wmicCommand = `wmic printer where "Default='TRUE'" get Name /value | findstr "Name="`;
+            const { stdout } = await execAsync(wmicCommand);
+            const match = stdout.match(/Name=(.+)/);
+            if (match && match[1]) {
+              const printerName = match[1].trim();
+              detectedPrinterName = printerName;
+              lastPrinterDetection = now;
+              console.log(`✅ Auto-detected printer (wmic): ${printerName}`);
+              return printerName;
+            }
+          } catch (wmicError) {
+            // Try listing all printers with wmic
+            try {
+              const wmicListCommand = `wmic printer get Name /value | findstr "Name=" | findstr /v "Name="`;
+              const { stdout } = await execAsync(wmicListCommand);
+              const lines = stdout.split('\n').filter(line => line.trim().length > 0);
+              if (lines.length > 0) {
+                const printerName = lines[0].replace('Name=', '').trim();
+                detectedPrinterName = printerName;
+                lastPrinterDetection = now;
+                console.log(`✅ Auto-detected printer (wmic list): ${printerName}`);
+                return printerName;
+              }
+            } catch (listError) {
+              console.warn('⚠️ Could not detect printer automatically');
+            }
+          }
+        }
+      }
+    } else if (isMac || isLinux) {
+      // Use lpstat to list all printers
+      try {
+        // Try lpstat -p to list printers
+        const { stdout } = await execAsync(`lpstat -p 2>/dev/null | head -1 | awk '{print $2}' | sed 's/^printer //'`);
+        const printerName = stdout.trim();
+        if (printerName && printerName.length > 0) {
+          detectedPrinterName = printerName;
+          lastPrinterDetection = now;
+          console.log(`✅ Auto-detected printer: ${printerName}`);
+          return printerName;
+        }
+      } catch (error: any) {
+        // Try lpstat -a to list all printers
+        try {
+          const { stdout } = await execAsync(`lpstat -a 2>/dev/null | head -1 | awk '{print $1}'`);
+          const printerName = stdout.trim();
+          if (printerName && printerName.length > 0) {
+            detectedPrinterName = printerName;
+            lastPrinterDetection = now;
+            console.log(`✅ Auto-detected printer (lpstat -a): ${printerName}`);
+            return printerName;
+          }
+        } catch (altError) {
+          console.warn('⚠️ Could not detect printer automatically');
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error detecting printer:', error);
+  }
+
+  return null;
+}
+
+/**
+ * Get printer name (from env, detected, or default)
+ */
+async function getPrinterName(): Promise<string> {
+  // First, try environment variable
+  if (process.env.PRINTER_NAME) {
+    return process.env.PRINTER_NAME;
+  }
+
+  // Try to detect automatically
+  const detected = await detectPrinter();
+  if (detected) {
+    return detected;
+  }
+
+  // Fallback to default
+  return 'HP_Deskjet_525';
+}
+
 export interface PrintJob {
   fileUrl: string;
   fileName: string;
@@ -68,7 +216,7 @@ async function downloadFile(url: string, outputPath: string): Promise<void> {
  * Print file using system printer command
  */
 async function printFile(filePath: string, options: PrintJob['printingOptions']): Promise<void> {
-  const printerName = process.env.PRINTER_NAME || 'HP_Deskjet_525';
+  const printerName = await getPrinterName();
   const printerPath = process.env.PRINTER_PATH;
 
   // Determine print command based on OS
@@ -303,7 +451,7 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
  * Check if printer is available
  */
 export async function checkPrinterStatus(): Promise<{ available: boolean; message: string; details?: string }> {
-  const printerName = process.env.PRINTER_NAME || 'HP_Deskjet_525';
+  const printerName = await getPrinterName();
   
   try {
     const isWindows = process.platform === 'win32';
