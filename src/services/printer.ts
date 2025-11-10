@@ -355,68 +355,76 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
       
       if (chromePath) {
         // Use Chrome to open PDF, then use SendKeys to print with all options
-        // Convert Windows path to file:// URL format
-        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:');
+        // Convert Windows path to file:// URL format (fix double slashes)
+        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:').replace(/\/+/g, '/');
         
         // Build SendKeys sequence to configure print options
-        // Chrome print dialog navigation: Printer selection → More settings → Color → Copies → Page size → Duplex
+        // Chrome print dialog: Use simpler navigation that's more reliable
+        // First, just get it working: Select printer → Print
+        // Then we can add options navigation
+        
+        // Escape printer name for SendKeys (special characters)
+        const printerNameForKeys = escapedPrinterName.replace(/'/g, "''");
+        
+        // Build SendKeys sequence
+        // 1. Open print dialog (Ctrl+P) - wait longer for dialog to fully load
+        // 2. Navigate to printer dropdown (usually first field or Tab a few times)
+        // 3. Type printer name to filter/select
+        // 4. Press Enter to select printer
+        // 5. Navigate to Print button (usually Tab or Enter)
+        // 6. Press Enter to print
+        
         let sendKeysSequence = '';
         
-        // 1. Open print dialog (Ctrl+P)
-        sendKeysSequence += "$wshell.SendKeys('^p'); Start-Sleep -Milliseconds 1500; ";
+        // 1. Open print dialog and wait for it to fully load
+        sendKeysSequence += "$wshell.SendKeys('^p'); Start-Sleep -Seconds 2; ";
         
-        // 2. Navigate to printer selection (3 tabs)
-        sendKeysSequence += "for ($i=0; $i -lt 3; $i++) { $wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 200 }; ";
+        // 2. Navigate to printer selection - Chrome print dialog: Tab to printer dropdown
+        // Chrome's print dialog: First Tab goes to destination (printer), then Tab goes to pages, etc.
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to printer dropdown
+        sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 500; "; // Open dropdown
         
-        // 3. Select printer
-        sendKeysSequence += `$wshell.SendKeys('${escapedPrinterName}'); Start-Sleep -Milliseconds 500; $wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; `;
+        // 3. Type printer name to filter (Chrome filters as you type)
+        sendKeysSequence += `$wshell.SendKeys('${printerNameForKeys}'); Start-Sleep -Milliseconds 1000; `;
         
-        // 4. Navigate to "More settings" (usually Tab or Down arrow)
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+        // 4. Select printer (Enter to select from filtered list)
+        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; ";
         
-        // 5. Configure Color mode (Color/Grayscale)
-        // Navigate to Color option
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        if (colorMode === 'bw') {
-          // Select Grayscale
-          sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; ";
-        } else {
-          // Select Color (for 'color' or 'mixed')
-          sendKeysSequence += "$wshell.SendKeys('{UP}'); Start-Sleep -Milliseconds 300; ";
-        }
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-        
-        // 6. Navigate to Copies field
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        if (copies > 1) {
-          // Set copies (clear field and type number)
-          sendKeysSequence += "$wshell.SendKeys('^a'); Start-Sleep -Milliseconds 200; ";
-          sendKeysSequence += `$wshell.SendKeys('${copies}'); Start-Sleep -Milliseconds 500; `;
-        }
-        
-        // 7. Navigate to Page size dropdown
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        if (pageSize === 'A3') {
-          // Select A3 (usually need to open dropdown and select)
-          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-          sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; "; // Navigate to A3
-          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-        }
-        
-        // 8. Navigate to Duplex option (if double-sided)
-        if (sided === 'double') {
+        // 5. Configure options if needed - navigate to More settings
+        if (colorMode === 'bw' || copies > 1 || pageSize === 'A3' || sided === 'double') {
+          // Navigate to More settings (usually Tab a few times or click)
+          // Chrome: Tab to "More settings" link, then Enter to expand
           sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
           sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          // Enable duplex/long-edge binding
-          sendKeysSequence += "$wshell.SendKeys(' '); Start-Sleep -Milliseconds 500; ";
+          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; "; // Expand More settings
+          
+          // Color mode (if needed)
+          if (colorMode === 'bw') {
+            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+            sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; "; // Select Grayscale
+            sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
+          }
+          
+          // Copies (if > 1)
+          if (copies > 1) {
+            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+            sendKeysSequence += "$wshell.SendKeys('^a'); Start-Sleep -Milliseconds 200; ";
+            sendKeysSequence += `$wshell.SendKeys('${copies}'); Start-Sleep -Milliseconds 500; `;
+          }
         }
         
-        // 9. Click Print button
+        // 6. Navigate to Print button - Chrome: Print button is usually at the bottom
+        // Tab through to reach Print button (usually several Tabs)
         sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 2; ";
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
         
-        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${escapedPrinterName}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; ${sendKeysSequence}Stop-Process -Id $process.Id -Force"`;
+        // 7. Click Print button (Enter or Space)
+        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 3; "; // Wait for print to start
+        
+        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${printerNameForKeys}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; ${sendKeysSequence}Stop-Process -Id $process.Id -Force"`;
       } else {
         // Fallback: Use default PDF viewer
         printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
@@ -455,61 +463,58 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
       
       if (chromePath) {
         // Use Chrome to open image, then use SendKeys to print with all options
-        // Convert Windows path to file:// URL format
-        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:');
+        // Convert Windows path to file:// URL format (fix double slashes)
+        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:').replace(/\/+/g, '/');
         
-        // Build SendKeys sequence to configure print options (same as PDF)
+        // Build SendKeys sequence (same as PDF)
+        const printerNameForKeys = escapedPrinterName.replace(/'/g, "''");
+        
         let sendKeysSequence = '';
         
-        // 1. Open print dialog (Ctrl+P)
-        sendKeysSequence += "$wshell.SendKeys('^p'); Start-Sleep -Milliseconds 1500; ";
+        // 1. Open print dialog and wait
+        sendKeysSequence += "$wshell.SendKeys('^p'); Start-Sleep -Seconds 2; ";
         
-        // 2. Navigate to printer selection (3 tabs)
-        sendKeysSequence += "for ($i=0; $i -lt 3; $i++) { $wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 200 }; ";
+        // 2. Navigate to printer selection - Tab to printer dropdown
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 500; "; // Tab to printer dropdown
+        sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 500; "; // Open dropdown
         
-        // 3. Select printer
-        sendKeysSequence += `$wshell.SendKeys('${escapedPrinterName}'); Start-Sleep -Milliseconds 500; $wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; `;
+        // 3. Type printer name to filter
+        sendKeysSequence += `$wshell.SendKeys('${printerNameForKeys}'); Start-Sleep -Milliseconds 1000; `;
         
-        // 4. Navigate to "More settings"
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+        // 4. Select printer
+        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; ";
         
-        // 5. Configure Color mode
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        if (colorMode === 'bw') {
-          sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; ";
-        } else {
-          sendKeysSequence += "$wshell.SendKeys('{UP}'); Start-Sleep -Milliseconds 300; ";
-        }
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-        
-        // 6. Navigate to Copies field
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        if (copies > 1) {
-          sendKeysSequence += "$wshell.SendKeys('^a'); Start-Sleep -Milliseconds 200; ";
-          sendKeysSequence += `$wshell.SendKeys('${copies}'); Start-Sleep -Milliseconds 500; `;
-        }
-        
-        // 7. Navigate to Page size dropdown
-        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        if (pageSize === 'A3') {
-          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-          sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
-        }
-        
-        // 8. Navigate to Duplex option (if double-sided)
-        if (sided === 'double') {
+        // 5. Configure options if needed - navigate to More settings
+        if (colorMode === 'bw' || copies > 1 || pageSize === 'A3' || sided === 'double') {
+          // Navigate to More settings
           sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
           sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-          sendKeysSequence += "$wshell.SendKeys(' '); Start-Sleep -Milliseconds 500; ";
+          sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+          sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; "; // Expand More settings
+          
+          if (colorMode === 'bw') {
+            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+            sendKeysSequence += "$wshell.SendKeys('{DOWN}'); Start-Sleep -Milliseconds 300; ";
+            sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 500; ";
+          }
+          
+          if (copies > 1) {
+            sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+            sendKeysSequence += "$wshell.SendKeys('^a'); Start-Sleep -Milliseconds 200; ";
+            sendKeysSequence += `$wshell.SendKeys('${copies}'); Start-Sleep -Milliseconds 500; `;
+          }
         }
         
-        // 9. Click Print button
+        // 6. Navigate to Print button
         sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
-        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 2; ";
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
+        sendKeysSequence += "$wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 300; ";
         
-        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${escapedPrinterName}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; ${sendKeysSequence}Stop-Process -Id $process.Id -Force"`;
+        // 7. Click Print button
+        sendKeysSequence += "$wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 3; ";
+        
+        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${printerNameForKeys}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; ${sendKeysSequence}Stop-Process -Id $process.Id -Force"`;
       } else {
         // Fallback: Use default image viewer
         printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
