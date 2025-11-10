@@ -118,6 +118,28 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
+    // Check if we need to print letter separator BEFORE the file (after every 10 files, before file 1 of new letter)
+    if (shouldPrintLetterSeparator()) {
+      const letter = getCurrentLetter();
+      console.log(`Printing letter separator: ${letter}`);
+      const letterPage = await generateLetterSeparator(letter);
+      const letterPagePath = path.join(tempDir, `letter_${letter}_${job.deliveryNumber}.pdf`);
+      fs.writeFileSync(letterPagePath, letterPage);
+      await printFile(letterPagePath, { ...job.printingOptions, copies: 1 });
+      fs.unlinkSync(letterPagePath);
+      console.log(`Letter separator ${letter} printed`);
+    }
+
+    // Print file number page separator BEFORE the file
+    const fileNumber = getCurrentFileNumber();
+    console.log(`Printing file number separator: File no: ${fileNumber}...`);
+    const fileNumberPage = await generateFileNumberPage(fileNumber);
+    const fileNumberPagePath = path.join(tempDir, `file_${fileNumber}_${job.deliveryNumber}.pdf`);
+    fs.writeFileSync(fileNumberPagePath, fileNumberPage);
+    await printFile(fileNumberPagePath, { ...job.printingOptions, copies: 1 });
+    fs.unlinkSync(fileNumberPagePath);
+    console.log(`File number separator printed: File no: ${fileNumber}`);
+
     // Download file
     const fileExtension = path.extname(job.fileName) || '.pdf';
     const tempFilePath = path.join(tempDir, `${job.deliveryNumber}${fileExtension}`);
@@ -130,28 +152,6 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     console.log(`Printing file: ${tempFilePath}`);
     await printFile(tempFilePath, job.printingOptions);
     console.log(`File printed successfully`);
-
-    // Print file number page separator after every file
-    const fileNumber = getCurrentFileNumber();
-    console.log(`Printing file number separator: File no: ${fileNumber}...`);
-    const fileNumberPage = await generateFileNumberPage(fileNumber);
-    const fileNumberPagePath = path.join(tempDir, `file_${fileNumber}_${job.deliveryNumber}.pdf`);
-    fs.writeFileSync(fileNumberPagePath, fileNumberPage);
-    await printFile(fileNumberPagePath, { ...job.printingOptions, copies: 1 });
-    fs.unlinkSync(fileNumberPagePath);
-    console.log(`File number separator printed: File no: ${fileNumber}`);
-
-    // Print letter separator after every 10 files
-    if (shouldPrintLetterSeparator()) {
-      const letter = getCurrentLetter();
-      console.log(`Printing letter separator: ${letter}`);
-      const letterPage = await generateLetterSeparator(letter);
-      const letterPagePath = path.join(tempDir, `letter_${letter}_${job.deliveryNumber}.pdf`);
-      fs.writeFileSync(letterPagePath, letterPage);
-      await printFile(letterPagePath, { ...job.printingOptions, copies: 1 });
-      fs.unlinkSync(letterPagePath);
-      console.log(`Letter separator ${letter} printed`);
-    }
 
     // Cleanup
     if (fs.existsSync(tempFilePath)) {
