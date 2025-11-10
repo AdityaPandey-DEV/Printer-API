@@ -204,10 +204,61 @@ Health check endpoint (no authentication required).
 - Exponential backoff between retries (max 5 minutes)
 - Queue survives server restarts
 
+## Network Setup (IMPORTANT)
+
+**⚠️ Problem:** If funPrinting runs on Render (cloud) and printer API runs on localhost, they cannot communicate directly.
+
+**✅ Solutions:**
+1. **Use ngrok** (recommended for development) - See `SETUP_NETWORK.md`
+2. **Use Cloudflare Tunnel** (recommended for production) - See `SETUP_NETWORK.md`
+3. **Deploy printer API to VPS** (most reliable) - See `SETUP_NETWORK.md`
+
+**Quick Start with ngrok:**
+```bash
+# 1. Install ngrok: brew install ngrok (or download from ngrok.com)
+# 2. Start printer API: npm start
+# 3. In another terminal: ngrok http 3001
+# 4. Copy the forwarding URL (e.g., https://abc123.ngrok-free.app)
+# 5. Use this URL in funPrinting PRINTER_API_URLS
+```
+
+See `SETUP_NETWORK.md` for detailed network setup instructions.
+
 ## How to Configure in funPrinting
 
 ### Step 1: Get Your Printer API URL
 
+**⚠️ IMPORTANT:** If funPrinting is on Render (cloud), you MUST use a tunnel service (ngrok, Cloudflare Tunnel, etc.) to expose your local printer API.
+
+**Option A: Using ngrok (Recommended for Development)**
+1. **Install ngrok:**
+   ```bash
+   brew install ngrok  # macOS
+   # Or download from https://ngrok.com
+   ```
+
+2. **Start printer API:**
+   ```bash
+   cd printer-api
+   npm start
+   ```
+
+3. **In another terminal, start ngrok:**
+   ```bash
+   ngrok http 3001
+   ```
+
+4. **Copy the forwarding URL:**
+   ```
+   Forwarding: https://abc123.ngrok-free.app -> http://localhost:3001
+   ```
+
+5. **Use this URL in funPrinting:**
+   ```
+   https://abc123.ngrok-free.app
+   ```
+
+**Option B: Using Local IP (Only if on same network)**
 1. **Find your computer's IP address:**
    ```bash
    # Windows
@@ -225,10 +276,9 @@ Health check endpoint (no authentication required).
    # Example: http://192.168.1.100:3001
    ```
 
-   **Note:** If running on the same machine as funPrinting, use:
-   ```
-   http://localhost:3001
-   ```
+   **Note:** This only works if funPrinting can access your local network (usually not possible with cloud hosting).
+
+**See `SETUP_NETWORK.md` for detailed network setup instructions.**
 
 ### Step 2: Configure funPrinting
 

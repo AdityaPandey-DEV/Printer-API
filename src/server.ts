@@ -52,11 +52,15 @@ app.use((req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🖨️  Printer API server running on port ${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0'; // Listen on all interfaces for network access
+app.listen(PORT, HOST, () => {
+  console.log(`🖨️  Printer API server running on ${HOST}:${PORT}`);
   console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔑 API Key authentication: ${process.env.API_KEY ? 'Enabled' : 'Disabled'}`);
   console.log(`🖨️  Printer: ${process.env.PRINTER_NAME || 'Not configured'}`);
+  console.log(`🌐 Local URL: http://localhost:${PORT}`);
+  console.log(`🌐 Network URL: http://0.0.0.0:${PORT}`);
+  console.log(`💡 To expose to internet, use ngrok: ngrok http ${PORT}`);
 });
 
 // Graceful shutdown
