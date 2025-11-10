@@ -271,14 +271,18 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   let printCommand: string;
 
   if (isWindows) {
-    // Windows: Use print command with proper escaping for printer names with spaces
-    // The print command requires quotes around the printer name and file path
-    // Escape quotes in printer name and file path
-    const escapedPrinterName = printerName.replace(/"/g, '\\"');
-    const escapedFilePath = filePath.replace(/"/g, '\\"');
+    // Windows: Use PowerShell to print - more reliable than print command
+    // Escape single quotes and backslashes for PowerShell
+    const escapedPrinterName = printerName.replace(/'/g, "''").replace(/\\/g, '\\\\');
+    const escapedFilePath = filePath.replace(/'/g, "''").replace(/\\/g, '\\\\');
     
-    // Use the Windows print command - it handles printer names with spaces when properly quoted
-    printCommand = `print /D:"${escapedPrinterName}" "${escapedFilePath}"`;
+    // Use PowerShell to print using the Windows Print Spooler API
+    // This method works with all file types and specific printer names
+    const fileExt = path.extname(filePath).toLowerCase();
+    
+    // Use PowerShell to print via the default application for the file type
+    // Set the printer as default temporarily, print, then restore
+    printCommand = `powershell -Command "$printer = '${escapedPrinterName}'; $file = '${escapedFilePath}'; $oldDefault = (Get-Printer | Where-Object {$_.Default -eq $true}).Name; Set-Printer -Name $printer -Default; Start-Sleep -Milliseconds 500; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden -ErrorAction Stop; Start-Sleep -Seconds 2; if ($oldDefault -and $oldDefault -ne $printer) { Set-Printer -Name $oldDefault -Default }"`;
   } else if (isMac) {
     // macOS: Use lp command
     const copies = options.copies || 1;
@@ -298,46 +302,28 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   try {
     const { stdout, stderr } = await execAsync(printCommand);
     
-    // IMPORTANT: Check for printer errors FIRST before logging success
-    // Windows print command outputs errors to stdout
+    // PowerShell Start-Process with PrintTo typically doesn't output much
+    // If there's output, check for errors
     if (stdout) {
       const stdoutLower = stdout.toLowerCase();
       const stdoutTrimmed = stdout.trim();
       
-      // Windows-specific printer error messages in stdout
-      // Check for "Unable to initialize device" - this is a critical error
+      // Check for error messages
       if (stdoutLower.includes('unable to initialize device') ||
           stdoutLower.includes('unable to connect') ||
           stdoutLower.includes('printer not found') ||
           stdoutLower.includes('printer does not exist') ||
           stdoutLower.includes('device not found') ||
-          stdoutLower.includes('cannot connect to printer')) {
+          stdoutLower.includes('cannot connect to printer') ||
+          stdoutLower.includes('cannot find') ||
+          stdoutLower.includes('error') ||
+          stdoutLower.includes('exception')) {
         console.error(`❌ Printer error detected in stdout: ${stdoutTrimmed}`);
-        throw new Error(`Printer not connected or not found: ${printerName}`);
+        throw new Error(`Printer error: ${stdoutTrimmed || 'Unable to print'}`);
       }
       
-      if (stdoutLower.includes('printer is not available') ||
-          stdoutLower.includes('printer is offline') ||
-          stdoutLower.includes('printer is stopped') ||
-          stdoutLower.includes('printer is disabled')) {
-        console.error(`❌ Printer error detected in stdout: ${stdoutTrimmed}`);
-        throw new Error(`Printer is offline or not available: ${printerName}`);
-      }
-      
-      if (stdoutLower.includes('power') && stdoutLower.includes('off')) {
-        console.error(`❌ Printer error detected in stdout: ${stdoutTrimmed}`);
-        throw new Error(`Printer appears to be powered off: ${printerName}`);
-      }
-      
-      // Check for success messages (Windows print command may say "is currently being printed")
-      if (stdoutLower.includes('is currently being printed') || 
-          stdoutLower.includes('currently being printed') ||
-          stdoutLower.includes('printed successfully')) {
-        console.log(`✅ Print command stdout: ${stdoutTrimmed}`);
-        // Wait a bit for the print job to be queued
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      } else if (stdoutTrimmed && !stdoutLower.includes('unable to')) {
-        console.log('Print command stdout:', stdoutTrimmed);
+      if (stdoutTrimmed) {
+        console.log(`✅ Print command output: ${stdoutTrimmed}`);
       }
     }
     
@@ -350,29 +336,30 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
       if (stderrLower.includes('unable to connect') || 
           stderrLower.includes('printer not found') ||
           stderrLower.includes('no such file or directory') ||
-          stderrLower.includes('printer does not exist')) {
+          stderrLower.includes('printer does not exist') ||
+          stderrLower.includes('cannot find') ||
+          stderrLower.includes('error') ||
+          stderrLower.includes('exception')) {
         console.error(`❌ Printer error detected in stderr: ${stderrTrimmed}`);
-        throw new Error(`Printer not connected or not found: ${printerName}`);
+        throw new Error(`Printer error: ${stderrTrimmed || 'Unable to print'}`);
       }
       
       if (stderrLower.includes('printer is not available') ||
           stderrLower.includes('printer is offline') ||
-          stderrLower.includes('printer is idle') ||
           stderrLower.includes('printer is stopped')) {
         console.error(`❌ Printer error detected in stderr: ${stderrTrimmed}`);
         throw new Error(`Printer is offline or not available: ${printerName}`);
       }
       
-      if (stderrLower.includes('power') && stderrLower.includes('off')) {
-        console.error(`❌ Printer error detected in stderr: ${stderrTrimmed}`);
-        throw new Error(`Printer appears to be powered off: ${printerName}`);
-      }
-      
       // Some systems output "request id" in stderr which is normal
-      if (!stderrLower.includes('request id') && !stderrLower.includes('request-id')) {
+      if (!stderrLower.includes('request id') && !stderrLower.includes('request-id') && stderrTrimmed) {
         console.warn('Print command stderr:', stderrTrimmed);
       }
     }
+    
+    // For PowerShell Start-Process, if no error, assume success
+    // Wait a bit for the print job to be queued
+    await new Promise(resolve => setTimeout(resolve, 2000));
   } catch (error: any) {
     // Check if it's a printer-related error
     // Windows print command may output errors to stdout, so check both stdout and stderr
