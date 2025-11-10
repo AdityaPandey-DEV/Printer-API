@@ -322,20 +322,80 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   let printCommand: string;
 
   if (isWindows) {
-    // Windows: Use PowerShell COM objects (Shell.Application) to print files
-    // This method works with all file types and doesn't require changing default printer
-    // Escape single quotes and backslashes for PowerShell
+    // Windows: Use application-based printing
+    // - PDFs: Use Chrome to print
+    // - DOCX: Use Word COM object to print
+    // - Images: Use Chrome or default viewer
     const escapedPrinterName = printerName.replace(/'/g, "''").replace(/\\/g, '\\\\');
     const escapedFilePath = filePath.replace(/'/g, "''").replace(/\\/g, '\\\\');
+    const fileExt = path.extname(filePath).toLowerCase();
     
-    // Get directory and filename separately for Shell.Application
-    const fileDir = path.dirname(escapedFilePath).replace(/\\/g, '/');
-    const fileName = path.basename(escapedFilePath);
+    // Determine color mode based on printing options
+    const colorMode = options.color === 'color' ? 'color' : (options.color === 'mixed' ? 'mixed' : 'bw');
+    const copies = options.copies || 1;
+    const pageSize = options.pageSize || 'A4';
+    const sided = options.sided || 'single';
     
-    // Primary method: Use Shell.Application COM object to print to specific printer
-    // This works with PDFs, images, and all file types that Windows can print
-    // Method: Use InvokeVerbEx with 'printto' verb and printer name
-    printCommand = `powershell -Command "$shell = New-Object -ComObject Shell.Application; $folder = $shell.NameSpace('${fileDir}'); $file = $folder.ParseName('${fileName}'); $file.InvokeVerbEx('printto', '${escapedPrinterName}')"`;
+    if (fileExt === '.pdf') {
+      // For PDFs: Use Chrome to open and print
+      const chromePaths = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        (process.env.LOCALAPPDATA || '') + '\\Google\\Chrome\\Application\\chrome.exe'
+      ];
+      
+      // Try to find Chrome
+      let chromePath = '';
+      for (const chrome of chromePaths) {
+        if (chrome && fs.existsSync(chrome)) {
+          chromePath = chrome;
+          break;
+        }
+      }
+      
+      if (chromePath) {
+        // Use Chrome to open PDF, then use SendKeys to print to specific printer
+        // Convert Windows path to file:// URL format
+        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:');
+        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${escapedPrinterName}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; $wshell.SendKeys('^p'); Start-Sleep -Milliseconds 1500; for ($i=0; $i -lt 3; $i++) { $wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 200 }; $wshell.SendKeys('$printer'); Start-Sleep -Milliseconds 500; $wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; $wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 2; Stop-Process -Id $process.Id -Force"`;
+      } else {
+        // Fallback: Use default PDF viewer
+        printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
+      }
+    } else if (fileExt === '.docx' || fileExt === '.doc') {
+      // For DOCX: Use Word COM object to print with options
+      const copiesParam = copies > 1 ? `, [ref]${copies}` : '';
+      const colorParam = colorMode === 'color' ? 'True' : 'False';
+      printCommand = `powershell -Command "$word = New-Object -ComObject Word.Application; $word.Visible = $false; $doc = $word.Documents.Open('${escapedFilePath}'); $word.ActivePrinter = '${escapedPrinterName}'; $printOptions = $doc.PrintOut([ref]$false, [ref]$false, [ref]0, [ref]'${escapedFilePath}', [ref]0, [ref]$false, [ref]0, [ref]0, [ref]0, [ref]0, [ref]$false, [ref]$false, [ref]0, [ref]0, [ref]0, [ref]0); $doc.Close([ref]$false); $word.Quit([ref]$false)"`;
+    } else if (fileExt === '.jpg' || fileExt === '.jpeg' || fileExt === '.png' || fileExt === '.gif' || fileExt === '.bmp') {
+      // For images: Use Chrome to open and print
+      const chromePaths = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        (process.env.LOCALAPPDATA || '') + '\\Google\\Chrome\\Application\\chrome.exe'
+      ];
+      
+      let chromePath = '';
+      for (const chrome of chromePaths) {
+        if (chrome && fs.existsSync(chrome)) {
+          chromePath = chrome;
+          break;
+        }
+      }
+      
+      if (chromePath) {
+        // Use Chrome to open image, then use SendKeys to print to specific printer
+        // Convert Windows path to file:// URL format
+        const fileUrlPath = escapedFilePath.replace(/\\/g, '/').replace(/^([A-Z]):/, '$1:');
+        printCommand = `powershell -Command "$file = '${escapedFilePath}'; $fileUrl = 'file:///${fileUrlPath}'; $printer = '${escapedPrinterName}'; $chrome = '${chromePath.replace(/\\/g, '\\\\')}'; $process = Start-Process -FilePath $chrome -ArgumentList $fileUrl, '--new-window' -WindowStyle Minimized -PassThru; Start-Sleep -Seconds 3; $wshell = New-Object -ComObject wscript.shell; $wshell.AppActivate('Chrome'); Start-Sleep -Milliseconds 500; $wshell.SendKeys('^p'); Start-Sleep -Milliseconds 1500; for ($i=0; $i -lt 3; $i++) { $wshell.SendKeys('{TAB}'); Start-Sleep -Milliseconds 200 }; $wshell.SendKeys('$printer'); Start-Sleep -Milliseconds 500; $wshell.SendKeys('{ENTER}'); Start-Sleep -Milliseconds 1000; $wshell.SendKeys('{ENTER}'); Start-Sleep -Seconds 2; Stop-Process -Id $process.Id -Force"`;
+      } else {
+        // Fallback: Use default image viewer
+        printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
+      }
+    } else {
+      // For other file types: Try default application
+      printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
+    }
   } else if (isMac) {
     // macOS: Use lp command
     const copies = options.copies || 1;
