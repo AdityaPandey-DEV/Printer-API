@@ -301,7 +301,9 @@ export async function checkPrinterStatus(): Promise<{ available: boolean; messag
     let parseCommand: string | null = null;
 
     if (isWindows) {
-      checkCommand = `wmic printer where name="${printerName}" get name,status`;
+      // Use PowerShell Get-Printer (modern Windows) with fallback to wmic
+      // PowerShell command: Get-Printer -Name "HP_Deskjet_525" | Select-Object Name, PrinterStatus
+      checkCommand = `powershell -Command "Get-Printer -Name '${printerName}' -ErrorAction SilentlyContinue | Select-Object Name, PrinterStatus | Format-List"`;
     } else if (isMac || isLinux) {
       // Use lpstat to check printer status
       checkCommand = `lpstat -p "${printerName}"`;
@@ -311,7 +313,31 @@ export async function checkPrinterStatus(): Promise<{ available: boolean; messag
       return { available: false, message: 'Unsupported platform' };
     }
 
-    const { stdout, stderr } = await execAsync(checkCommand);
+    let stdout: string = '';
+    let stderr: string = '';
+    
+    try {
+      const result = await execAsync(checkCommand);
+      stdout = result.stdout || '';
+      stderr = result.stderr || '';
+    } catch (error: any) {
+      // If PowerShell fails, try wmic as fallback (for older Windows)
+      if (isWindows) {
+        try {
+          const wmicCommand = `wmic printer where name="${printerName}" get name,status`;
+          const wmicResult = await execAsync(wmicCommand);
+          stdout = wmicResult.stdout || '';
+          stderr = wmicResult.stderr || '';
+        } catch (wmicError: any) {
+          // Both PowerShell and wmic failed
+          stderr = wmicError.stderr || wmicError.message || error.message || '';
+          stdout = error.stdout || '';
+        }
+      } else {
+        stderr = error.stderr || error.message || '';
+        stdout = error.stdout || '';
+      }
+    }
     
     // Check for errors in stderr
     if (stderr) {
@@ -330,8 +356,23 @@ export async function checkPrinterStatus(): Promise<{ available: boolean; messag
     // Parse output for printer status
     const outputLower = stdout.toLowerCase();
     
-    // Check for offline/stopped status
-    if (outputLower.includes('idle') || outputLower.includes('printing') || outputLower.includes('ready')) {
+    // Check if printer was found (PowerShell returns empty if printer not found)
+    if (!stdout || stdout.trim().length === 0) {
+      return { 
+        available: false, 
+        message: `Printer not found: ${printerName}`,
+        details: 'Printer may not be installed or connected. Please check USB connection and ensure printer is powered on.'
+      };
+    }
+    
+    // PowerShell Get-Printer status values: Normal, Warning, Error, Unknown
+    // wmic status values: Idle, Printing, Ready, etc.
+    // Check for available status
+    if (outputLower.includes('normal') || 
+        outputLower.includes('idle') || 
+        outputLower.includes('printing') || 
+        outputLower.includes('ready') ||
+        outputLower.includes('online')) {
       // Try to get more details
       if (parseCommand) {
         try {
@@ -348,7 +389,12 @@ export async function checkPrinterStatus(): Promise<{ available: boolean; messag
       return { available: true, message: 'Printer is available' };
     }
     
-    if (outputLower.includes('offline') || outputLower.includes('stopped') || outputLower.includes('disabled')) {
+    // Check for offline/stopped/error status
+    if (outputLower.includes('offline') || 
+        outputLower.includes('stopped') || 
+        outputLower.includes('disabled') ||
+        outputLower.includes('error') ||
+        outputLower.includes('warning')) {
       return { 
         available: false, 
         message: `Printer is offline: ${printerName}`,
