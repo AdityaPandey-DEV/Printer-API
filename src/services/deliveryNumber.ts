@@ -20,7 +20,7 @@ interface DeliveryNumberState {
 let deliveryState: DeliveryNumberState = {
   currentLetter: process.env.DELIVERY_NUMBER_START || 'A',
   currentCount: 0,
-  currentFileNumber: 0,
+  currentFileNumber: 1, // Start at 1, not 0
   totalFiles: 0,
   lastDate: getCurrentDateString()
 };
@@ -52,7 +52,7 @@ export function generateDeliveryNumber(printerIndex: number): string {
   if (currentDate !== deliveryState.lastDate) {
     deliveryState.currentLetter = process.env.DELIVERY_NUMBER_START || 'A';
     deliveryState.currentCount = 0;
-    deliveryState.currentFileNumber = 0;
+    deliveryState.currentFileNumber = 1; // Start at 1, not 0
     deliveryState.lastDate = currentDate;
   }
 
@@ -61,9 +61,14 @@ export function generateDeliveryNumber(printerIndex: number): string {
   deliveryState.totalFiles++;
   
   // Increment file number (1-10)
-  deliveryState.currentFileNumber++;
-  if (deliveryState.currentFileNumber > 10) {
+  // If file number is 0, start at 1, otherwise increment
+  if (deliveryState.currentFileNumber === 0 || deliveryState.currentFileNumber < 1) {
     deliveryState.currentFileNumber = 1;
+  } else {
+    deliveryState.currentFileNumber++;
+    if (deliveryState.currentFileNumber > 10) {
+      deliveryState.currentFileNumber = 1;
+    }
   }
 
   // Move to next letter after 10 files
@@ -98,8 +103,13 @@ export function getCurrentLetter(): string {
 
 /**
  * Get current file number (1-10)
+ * If file number is 0, it means we need to start at 1
  */
 export function getCurrentFileNumber(): number {
+  // If file number is 0 or invalid, return 1
+  if (deliveryState.currentFileNumber === 0 || deliveryState.currentFileNumber < 1 || deliveryState.currentFileNumber > 10) {
+    return 1;
+  }
   return deliveryState.currentFileNumber;
 }
 

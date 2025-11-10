@@ -151,7 +151,7 @@ async function getPrinterName(): Promise<string> {
     return detected;
   }
 
-  // Fallback to default
+  // Fallback to default (will be updated by auto-detection if printer is found)
   return 'HP_Deskjet_525';
 }
 
@@ -370,6 +370,21 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
+    // Extract file number from delivery number (last digit)
+    // Delivery number format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}{FILE_NUMBER}
+    // Example: A2025111011 = file number 1, A2025111012 = file number 2
+    let fileNumber = 1;
+    if (job.deliveryNumber && job.deliveryNumber.length > 0) {
+      const lastChar = job.deliveryNumber.charAt(job.deliveryNumber.length - 1);
+      const parsedFileNumber = parseInt(lastChar, 10);
+      if (!isNaN(parsedFileNumber) && parsedFileNumber >= 1 && parsedFileNumber <= 10) {
+        fileNumber = parsedFileNumber;
+      }
+    } else {
+      // Fallback to getCurrentFileNumber if delivery number is not available
+      fileNumber = getCurrentFileNumber();
+    }
+
     // Check if we need to print letter separator BEFORE the file (after every 10 files, before file 1 of new letter)
     if (shouldPrintLetterSeparator()) {
       const letter = getCurrentLetter();
@@ -383,7 +398,6 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     }
 
     // Print file number page separator BEFORE the file
-    const fileNumber = getCurrentFileNumber();
     console.log(`Printing file number separator: File no: ${fileNumber}...`);
     const fileNumberPage = await generateFileNumberPage(fileNumber);
     const fileNumberPagePath = path.join(tempDir, `file_${fileNumber}_${job.deliveryNumber}.pdf`);
