@@ -100,17 +100,21 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   try {
     const { stdout, stderr } = await execAsync(printCommand);
     
-    // Check for printer errors in stdout (Windows print command outputs errors to stdout)
+    // IMPORTANT: Check for printer errors FIRST before logging success
+    // Windows print command outputs errors to stdout
     if (stdout) {
       const stdoutLower = stdout.toLowerCase();
+      const stdoutTrimmed = stdout.trim();
       
       // Windows-specific printer error messages in stdout
+      // Check for "Unable to initialize device" - this is a critical error
       if (stdoutLower.includes('unable to initialize device') ||
           stdoutLower.includes('unable to connect') ||
           stdoutLower.includes('printer not found') ||
           stdoutLower.includes('printer does not exist') ||
           stdoutLower.includes('device not found') ||
           stdoutLower.includes('cannot connect to printer')) {
+        console.error(`❌ Printer error detected in stdout: ${stdoutTrimmed}`);
         throw new Error(`Printer not connected or not found: ${printerName}`);
       }
       
@@ -118,23 +122,32 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           stdoutLower.includes('printer is offline') ||
           stdoutLower.includes('printer is stopped') ||
           stdoutLower.includes('printer is disabled')) {
+        console.error(`❌ Printer error detected in stdout: ${stdoutTrimmed}`);
         throw new Error(`Printer is offline or not available: ${printerName}`);
       }
       
       if (stdoutLower.includes('power') && stdoutLower.includes('off')) {
+        console.error(`❌ Printer error detected in stdout: ${stdoutTrimmed}`);
         throw new Error(`Printer appears to be powered off: ${printerName}`);
+      }
+      
+      // Only log stdout if it's not an error (for debugging)
+      if (stdoutTrimmed && !stdoutLower.includes('unable to')) {
+        console.log('Print command stdout:', stdoutTrimmed);
       }
     }
     
     // Check for printer errors in stderr
     if (stderr) {
       const stderrLower = stderr.toLowerCase();
+      const stderrTrimmed = stderr.trim();
       
       // Common printer error messages
       if (stderrLower.includes('unable to connect') || 
           stderrLower.includes('printer not found') ||
           stderrLower.includes('no such file or directory') ||
           stderrLower.includes('printer does not exist')) {
+        console.error(`❌ Printer error detected in stderr: ${stderrTrimmed}`);
         throw new Error(`Printer not connected or not found: ${printerName}`);
       }
       
@@ -142,20 +155,20 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           stderrLower.includes('printer is offline') ||
           stderrLower.includes('printer is idle') ||
           stderrLower.includes('printer is stopped')) {
+        console.error(`❌ Printer error detected in stderr: ${stderrTrimmed}`);
         throw new Error(`Printer is offline or not available: ${printerName}`);
       }
       
       if (stderrLower.includes('power') && stderrLower.includes('off')) {
+        console.error(`❌ Printer error detected in stderr: ${stderrTrimmed}`);
         throw new Error(`Printer appears to be powered off: ${printerName}`);
       }
       
       // Some systems output "request id" in stderr which is normal
       if (!stderrLower.includes('request id') && !stderrLower.includes('request-id')) {
-        console.warn('Print command stderr:', stderr);
+        console.warn('Print command stderr:', stderrTrimmed);
       }
     }
-    
-    console.log('Print command stdout:', stdout);
   } catch (error: any) {
     // Check if it's a printer-related error
     // Windows print command may output errors to stdout, so check both stdout and stderr
