@@ -218,6 +218,12 @@ async function downloadFile(url: string, outputPath: string): Promise<void> {
 async function printFile(filePath: string, options: PrintJob['printingOptions']): Promise<void> {
   const printerName = await getPrinterName();
   const printerPath = process.env.PRINTER_PATH;
+  
+  // Check if printer is available before printing
+  const printerStatus = await checkPrinterStatus();
+  if (!printerStatus.available) {
+    throw new Error(`Printer is not available: ${printerStatus.message}. ${printerStatus.details || ''}`);
+  }
 
   // Determine print command based on OS
   const isWindows = process.platform === 'win32';
@@ -285,8 +291,14 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
         throw new Error(`Printer appears to be powered off: ${printerName}`);
       }
       
-      // Only log stdout if it's not an error (for debugging)
-      if (stdoutTrimmed && !stdoutLower.includes('unable to')) {
+      // Check for success messages (Windows print command may say "is currently being printed")
+      if (stdoutLower.includes('is currently being printed') || 
+          stdoutLower.includes('currently being printed') ||
+          stdoutLower.includes('printed successfully')) {
+        console.log(`✅ Print command stdout: ${stdoutTrimmed}`);
+        // Wait a bit for the print job to be queued
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } else if (stdoutTrimmed && !stdoutLower.includes('unable to')) {
         console.log('Print command stdout:', stdoutTrimmed);
       }
     }
@@ -405,6 +417,9 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     await printFile(fileNumberPagePath, { ...job.printingOptions, copies: 1 });
     fs.unlinkSync(fileNumberPagePath);
     console.log(`File number separator printed: File no: ${fileNumber}`);
+
+    // Add a small delay after printing separator to ensure printer is ready
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Download file
     const fileExtension = path.extname(job.fileName) || '.pdf';
