@@ -2,11 +2,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 /**
- * Generate a blank page PDF for separator printing
+ * Generate a file number page PDF for separator printing
+ * @param fileNumber - File number (1-10)
  */
-export async function generateBlankPage(): Promise<Buffer> {
-  // Create a minimal PDF with a blank page
-  // Using a simple PDF structure
+export async function generateFileNumberPage(fileNumber: number): Promise<Buffer> {
+  // Create a PDF with "File no: X" centered on the page
+  const fileNumberText = `File no: ${fileNumber}`;
   const pdfContent = `%PDF-1.4
 1 0 obj
 <<
@@ -31,7 +32,7 @@ endobj
 /F1 <<
 /Type /Font
 /Subtype /Type1
-/BaseFont /Helvetica
+/BaseFont /Helvetica-Bold
 >>
 >>
 >>
@@ -40,13 +41,13 @@ endobj
 endobj
 4 0 obj
 <<
-/Length 44
+/Length 120
 >>
 stream
 BT
-/F1 12 Tf
-100 700 Td
-( ) Tj
+/F1 24 Tf
+200 400 Td
+(${fileNumberText}) Tj
 ET
 endstream
 endobj
@@ -63,7 +64,7 @@ trailer
 /Root 1 0 R
 >>
 startxref
-390
+446
 %%EOF`;
 
   return Buffer.from(pdfContent);

@@ -2,8 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { generateBlankPage, generateLetterSeparator } from '../utils/printerUtils';
-import { shouldPrintLetterSeparator, getCurrentLetter } from './deliveryNumber';
+import { generateFileNumberPage, generateLetterSeparator } from '../utils/printerUtils';
+import { shouldPrintLetterSeparator, getCurrentLetter, getCurrentFileNumber } from './deliveryNumber';
 
 const execAsync = promisify(exec);
 
@@ -131,14 +131,15 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     await printFile(tempFilePath, job.printingOptions);
     console.log(`File printed successfully`);
 
-    // Print blank page separator after every file
-    console.log('Printing blank page separator...');
-    const blankPage = await generateBlankPage();
-    const blankPagePath = path.join(tempDir, `blank_${job.deliveryNumber}.pdf`);
-    fs.writeFileSync(blankPagePath, blankPage);
-    await printFile(blankPagePath, { ...job.printingOptions, copies: 1 });
-    fs.unlinkSync(blankPagePath);
-    console.log('Blank page separator printed');
+    // Print file number page separator after every file
+    const fileNumber = getCurrentFileNumber();
+    console.log(`Printing file number separator: File no: ${fileNumber}...`);
+    const fileNumberPage = await generateFileNumberPage(fileNumber);
+    const fileNumberPagePath = path.join(tempDir, `file_${fileNumber}_${job.deliveryNumber}.pdf`);
+    fs.writeFileSync(fileNumberPagePath, fileNumberPage);
+    await printFile(fileNumberPagePath, { ...job.printingOptions, copies: 1 });
+    fs.unlinkSync(fileNumberPagePath);
+    console.log(`File number separator printed: File no: ${fileNumber}`);
 
     // Print letter separator after every 10 files
     if (shouldPrintLetterSeparator()) {

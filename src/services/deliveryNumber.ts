@@ -12,6 +12,7 @@
 interface DeliveryNumberState {
   currentLetter: string;
   currentCount: number; // 1-10 for current letter
+  currentFileNumber: number; // 1-10 for current file number in letter cycle
   totalFiles: number; // Total files printed since start
   lastDate: string; // YYYYMMDD format
 }
@@ -19,6 +20,7 @@ interface DeliveryNumberState {
 let deliveryState: DeliveryNumberState = {
   currentLetter: process.env.DELIVERY_NUMBER_START || 'A',
   currentCount: 0,
+  currentFileNumber: 0,
   totalFiles: 0,
   lastDate: getCurrentDateString()
 };
@@ -50,17 +52,25 @@ export function generateDeliveryNumber(printerIndex: number): string {
   if (currentDate !== deliveryState.lastDate) {
     deliveryState.currentLetter = process.env.DELIVERY_NUMBER_START || 'A';
     deliveryState.currentCount = 0;
+    deliveryState.currentFileNumber = 0;
     deliveryState.lastDate = currentDate;
   }
 
   // Increment count for current letter
   deliveryState.currentCount++;
   deliveryState.totalFiles++;
+  
+  // Increment file number (1-10)
+  deliveryState.currentFileNumber++;
+  if (deliveryState.currentFileNumber > 10) {
+    deliveryState.currentFileNumber = 1;
+  }
 
   // Move to next letter after 10 files
   if (deliveryState.currentCount > 10) {
     deliveryState.currentLetter = getNextLetter(deliveryState.currentLetter);
     deliveryState.currentCount = 1;
+    deliveryState.currentFileNumber = 1; // Reset file number for new letter
   }
 
   // Format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}
@@ -87,12 +97,20 @@ export function getCurrentLetter(): string {
 }
 
 /**
+ * Get current file number (1-10)
+ */
+export function getCurrentFileNumber(): number {
+  return deliveryState.currentFileNumber;
+}
+
+/**
  * Reset delivery number state (for testing or manual reset)
  */
 export function resetDeliveryState() {
   deliveryState = {
     currentLetter: process.env.DELIVERY_NUMBER_START || 'A',
     currentCount: 0,
+    currentFileNumber: 0,
     totalFiles: 0,
     lastDate: getCurrentDateString()
   };

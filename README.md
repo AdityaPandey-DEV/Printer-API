@@ -7,7 +7,7 @@ Local printer API server for USB printer integration with delivery number system
 - USB printer integration via system print commands
 - Print queue management with infinite retry
 - Delivery number generation (A-Z cycle: 260 files total)
-- Blank page separator after every file
+- File number page separator after every file (File no: 1-10)
 - Full-page letter separator after every 10 files
 - API key authentication
 - Health check endpoint
@@ -190,8 +190,9 @@ Health check endpoint (no authentication required).
 
 **Logic:**
 - Cycles through A-Z (260 files total: 10 files per letter × 26 letters)
-- After every file: prints blank page separator
+- After every file: prints file number page separator (File no: 1, File no: 2, ... File no: 10)
 - After every 10 files: prints full-page letter separator (A, B, C...)
+- File numbers reset to 1 when moving to next letter
 - Date format: YYYYMMDD
 - Resets letter and count when date changes
 
