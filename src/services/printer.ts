@@ -96,13 +96,67 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   }
 
   console.log(`Executing print command: ${printCommand}`);
-  const { stdout, stderr } = await execAsync(printCommand);
   
-  if (stderr && !stderr.includes('request id')) {
-    console.warn('Print command stderr:', stderr);
+  try {
+    const { stdout, stderr } = await execAsync(printCommand);
+    
+    // Check for printer errors in stderr
+    if (stderr) {
+      const stderrLower = stderr.toLowerCase();
+      
+      // Common printer error messages
+      if (stderrLower.includes('unable to connect') || 
+          stderrLower.includes('printer not found') ||
+          stderrLower.includes('no such file or directory') ||
+          stderrLower.includes('printer does not exist')) {
+        throw new Error(`Printer not connected or not found: ${printerName}`);
+      }
+      
+      if (stderrLower.includes('printer is not available') ||
+          stderrLower.includes('printer is offline') ||
+          stderrLower.includes('printer is idle') ||
+          stderrLower.includes('printer is stopped')) {
+        throw new Error(`Printer is offline or not available: ${printerName}`);
+      }
+      
+      if (stderrLower.includes('power') && stderrLower.includes('off')) {
+        throw new Error(`Printer appears to be powered off: ${printerName}`);
+      }
+      
+      // Some systems output "request id" in stderr which is normal
+      if (!stderrLower.includes('request id') && !stderrLower.includes('request-id')) {
+        console.warn('Print command stderr:', stderr);
+      }
+    }
+    
+    console.log('Print command stdout:', stdout);
+  } catch (error: any) {
+    // Check if it's a printer-related error
+    const errorMessage = error.message || error.stderr || String(error);
+    const errorLower = errorMessage.toLowerCase();
+    
+    // Detect specific printer errors
+    if (errorLower.includes('unable to connect') ||
+        errorLower.includes('printer not found') ||
+        errorLower.includes('no such file or directory') ||
+        errorLower.includes('printer does not exist')) {
+      throw new Error(`Printer not connected: ${printerName}. Please check USB connection.`);
+    }
+    
+    if (errorLower.includes('printer is not available') ||
+        errorLower.includes('printer is offline') ||
+        errorLower.includes('printer is idle') ||
+        errorLower.includes('printer is stopped')) {
+      throw new Error(`Printer is offline: ${printerName}. Please turn on the printer.`);
+    }
+    
+    if (errorLower.includes('power') && errorLower.includes('off')) {
+      throw new Error(`Printer appears to be powered off: ${printerName}. Please turn on the printer.`);
+    }
+    
+    // Re-throw original error if not a known printer error
+    throw error;
   }
-  
-  console.log('Print command stdout:', stdout);
 }
 
 /**
@@ -165,10 +219,37 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     };
   } catch (error) {
     console.error('Error printing job:', error);
+    
+    // Extract error message
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorLower = errorMessage.toLowerCase();
+    
+    // Detect specific error types and provide helpful messages
+    let userMessage = 'Failed to print job';
+    let errorDetails = errorMessage;
+    
+    if (errorLower.includes('printer not connected') ||
+        errorLower.includes('unable to connect') ||
+        errorLower.includes('printer not found')) {
+      userMessage = 'Printer not connected';
+      errorDetails = 'Please check USB connection and ensure printer is powered on';
+    } else if (errorLower.includes('printer is offline') ||
+               errorLower.includes('printer is not available') ||
+               errorLower.includes('printer is stopped')) {
+      userMessage = 'Printer is offline';
+      errorDetails = 'Printer may be powered off or disconnected. Please check power and USB connection.';
+    } else if (errorLower.includes('power') && errorLower.includes('off')) {
+      userMessage = 'Printer appears to be powered off';
+      errorDetails = 'Please turn on the printer and try again';
+    } else if (errorLower.includes('timeout') || errorLower.includes('timed out')) {
+      userMessage = 'Print job timed out';
+      errorDetails = 'Printer may be busy or not responding. Will retry automatically.';
+    }
+    
     return {
       success: false,
-      message: 'Failed to print job',
-      error: error instanceof Error ? error.message : 'Unknown error',
+      message: userMessage,
+      error: errorDetails,
       deliveryNumber: job.deliveryNumber
     };
   }
@@ -177,29 +258,104 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
 /**
  * Check if printer is available
  */
-export async function checkPrinterStatus(): Promise<{ available: boolean; message: string }> {
+export async function checkPrinterStatus(): Promise<{ available: boolean; message: string; details?: string }> {
+  const printerName = process.env.PRINTER_NAME || 'HP_Deskjet_525';
+  
   try {
-    const printerName = process.env.PRINTER_NAME || 'HP_Deskjet_525';
     const isWindows = process.platform === 'win32';
     const isMac = process.platform === 'darwin';
     const isLinux = process.platform === 'linux';
 
     let checkCommand: string;
+    let parseCommand: string | null = null;
 
     if (isWindows) {
       checkCommand = `wmic printer where name="${printerName}" get name,status`;
     } else if (isMac || isLinux) {
+      // Use lpstat to check printer status
       checkCommand = `lpstat -p "${printerName}"`;
+      // Also check if printer is enabled and accepting jobs
+      parseCommand = `lpstat -p "${printerName}" -l`;
     } else {
       return { available: false, message: 'Unsupported platform' };
     }
 
-    await execAsync(checkCommand);
-    return { available: true, message: 'Printer is available' };
-  } catch (error) {
+    const { stdout, stderr } = await execAsync(checkCommand);
+    
+    // Check for errors in stderr
+    if (stderr) {
+      const stderrLower = stderr.toLowerCase();
+      if (stderrLower.includes('printer not found') ||
+          stderrLower.includes('unable to connect') ||
+          stderrLower.includes('no such file or directory')) {
+        return { 
+          available: false, 
+          message: `Printer not connected: ${printerName}`,
+          details: 'Please check USB connection and ensure printer is powered on'
+        };
+      }
+    }
+    
+    // Parse output for printer status
+    const outputLower = stdout.toLowerCase();
+    
+    // Check for offline/stopped status
+    if (outputLower.includes('idle') || outputLower.includes('printing') || outputLower.includes('ready')) {
+      // Try to get more details
+      if (parseCommand) {
+        try {
+          const { stdout: details } = await execAsync(parseCommand);
+          return { 
+            available: true, 
+            message: 'Printer is available',
+            details: details.trim()
+          };
+        } catch {
+          // Ignore parse command errors
+        }
+      }
+      return { available: true, message: 'Printer is available' };
+    }
+    
+    if (outputLower.includes('offline') || outputLower.includes('stopped') || outputLower.includes('disabled')) {
+      return { 
+        available: false, 
+        message: `Printer is offline: ${printerName}`,
+        details: 'Printer may be powered off or disconnected. Please check power and USB connection.'
+      };
+    }
+    
+    // If we got here, printer exists but status is unclear
+    return { available: true, message: 'Printer is available (status unclear)' };
+  } catch (error: any) {
+    const errorMessage = error.message || error.stderr || String(error);
+    const errorLower = errorMessage.toLowerCase();
+    
+    // Detect specific error types
+    if (errorLower.includes('printer not found') ||
+        errorLower.includes('unable to connect') ||
+        errorLower.includes('no such file or directory') ||
+        errorLower.includes('printer does not exist')) {
+      return { 
+        available: false, 
+        message: `Printer not connected: ${printerName}`,
+        details: 'Please check USB connection and ensure printer is powered on'
+      };
+    }
+    
+    if (errorLower.includes('printer is not available') ||
+        errorLower.includes('printer is offline')) {
+      return { 
+        available: false, 
+        message: `Printer is offline: ${printerName}`,
+        details: 'Printer may be powered off. Please turn on the printer.'
+      };
+    }
+    
     return { 
       available: false, 
-      message: error instanceof Error ? error.message : 'Printer check failed' 
+      message: error instanceof Error ? error.message : 'Printer check failed',
+      details: 'Unable to determine printer status. Please check printer connection and power.'
     };
   }
 }

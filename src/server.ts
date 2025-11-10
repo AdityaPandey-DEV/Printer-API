@@ -23,12 +23,36 @@ app.use((req, res, next) => {
 
 // Health check (no auth required)
 app.get('/health', async (req, res) => {
-  res.json({
-    success: true,
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    service: 'printer-api'
-  });
+  try {
+    // Check printer status
+    const { checkPrinterStatus } = await import('./services/printer');
+    const printerStatus = await checkPrinterStatus();
+    
+    res.json({
+      success: true,
+      status: printerStatus.available ? 'healthy' : 'degraded',
+      timestamp: new Date().toISOString(),
+      service: 'printer-api',
+      printer: {
+        available: printerStatus.available,
+        message: printerStatus.message,
+        details: printerStatus.details
+      }
+    });
+  } catch (error) {
+    // If printer check fails, still return healthy status for the API itself
+    res.json({
+      success: true,
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      service: 'printer-api',
+      printer: {
+        available: false,
+        message: 'Unable to check printer status',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    });
+  }
 });
 
 // API routes with authentication

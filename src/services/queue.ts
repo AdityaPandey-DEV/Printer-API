@@ -106,21 +106,54 @@ async function processQueue(): Promise<void> {
         console.log(`Job ${queuedJob.id} completed successfully`);
       } else {
         // Keep in queue and retry (infinite retry)
-        console.log(`Job ${queuedJob.id} failed, will retry: ${result.error}`);
+        const errorMessage = result.error || result.message || 'Unknown error';
+        console.log(`Job ${queuedJob.id} failed (Attempt ${queuedJob.attempts}), will retry: ${errorMessage}`);
+        
+        // Log specific error types
+        const errorLower = errorMessage.toLowerCase();
+        if (errorLower.includes('printer not connected') || 
+            errorLower.includes('printer is offline') ||
+            errorLower.includes('powered off')) {
+          console.warn(`⚠️ Printer issue detected: ${errorMessage}`);
+          console.warn(`⚠️ Job will be retried when printer is available`);
+        }
+        
         saveQueue();
         
         // Wait before retry (exponential backoff, max 5 minutes)
-        const waitTime = Math.min(queuedJob.attempts * 10000, 300000);
+        // For printer connection issues, use longer wait times
+        const baseWaitTime = errorLower.includes('printer not connected') || 
+                             errorLower.includes('printer is offline') ||
+                             errorLower.includes('powered off') 
+                             ? 30000 // 30 seconds for printer issues
+                             : 10000; // 10 seconds for other errors
+        const waitTime = Math.min(queuedJob.attempts * baseWaitTime, 300000);
         console.log(`Waiting ${waitTime}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     } catch (error) {
-      console.error(`Error processing job ${queuedJob.id}:`, error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`Error processing job ${queuedJob.id}:`, errorMessage);
+      
+      // Log specific error types
+      const errorLower = errorMessage.toLowerCase();
+      if (errorLower.includes('printer not connected') || 
+          errorLower.includes('printer is offline') ||
+          errorLower.includes('powered off')) {
+        console.warn(`⚠️ Printer issue detected: ${errorMessage}`);
+        console.warn(`⚠️ Job will be retried when printer is available`);
+      }
+      
       // Keep in queue and retry
       saveQueue();
       
-      // Wait before retry
-      const waitTime = Math.min(queuedJob.attempts * 10000, 300000);
+      // Wait before retry (longer wait for printer connection issues)
+      const baseWaitTime = errorLower.includes('printer not connected') || 
+                           errorLower.includes('printer is offline') ||
+                           errorLower.includes('powered off') 
+                           ? 30000 // 30 seconds for printer issues
+                           : 10000; // 10 seconds for other errors
+      const waitTime = Math.min(queuedJob.attempts * baseWaitTime, 300000);
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
