@@ -1,7 +1,12 @@
 export interface PrintJobData {
-  fileUrl: string;
-  fileName: string;
-  fileType: string;
+  // Legacy: single file (for backward compatibility)
+  fileUrl?: string;
+  fileName?: string;
+  fileType?: string;
+  // Multiple files support
+  fileURLs?: string[];
+  originalFileNames?: string[];
+  fileTypes?: string[];
   printingOptions: {
     pageSize: 'A4' | 'A3';
     color: 'color' | 'bw' | 'mixed';

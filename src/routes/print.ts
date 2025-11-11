@@ -19,44 +19,111 @@ router.post('/print', async (req: Request, res: Response) => {
     const jobData: PrintJobData = req.body;
     const printerIndex = parseInt(req.body.printerIndex || '1', 10);
 
+    // Check if multiple files exist
+    const hasMultipleFiles = jobData.fileURLs && jobData.fileURLs.length > 0;
+    const hasSingleFile = jobData.fileUrl && !hasMultipleFiles;
+
     // Validate required fields
-    if (!jobData.fileUrl || !jobData.fileName) {
+    if (!hasMultipleFiles && !hasSingleFile) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: fileUrl and fileName are required'
+        error: 'Missing required fields: Either fileUrl/fileName or fileURLs/originalFileNames are required'
       });
     }
 
-    // Generate delivery number
-    const deliveryNumber = generateDeliveryNumber(printerIndex);
+    if (hasMultipleFiles) {
+      // Multiple files: create separate print jobs for each file
+      const fileURLs = jobData.fileURLs!;
+      const originalFileNames = jobData.originalFileNames || fileURLs.map((_, idx) => `File ${idx + 1}`);
+      const fileTypes = jobData.fileTypes || fileURLs.map(() => 'application/octet-stream');
 
-    // Create print job
-    const printJob = {
-      fileUrl: jobData.fileUrl,
-      fileName: jobData.fileName,
-      fileType: jobData.fileType || 'application/pdf',
-      printingOptions: {
-        pageSize: jobData.printingOptions?.pageSize || 'A4',
-        color: jobData.printingOptions?.color || 'bw',
-        sided: jobData.printingOptions?.sided || 'single',
-        copies: jobData.printingOptions?.copies || 1,
-        pageCount: jobData.printingOptions?.pageCount,
-        pageColors: jobData.printingOptions?.pageColors
-      },
-      deliveryNumber
-    };
+      if (fileURLs.length !== originalFileNames.length) {
+        return res.status(400).json({
+          success: false,
+          error: 'fileURLs and originalFileNames arrays must have the same length'
+        });
+      }
 
-    // Add to queue
-    const jobId = addToQueue(printJob, printerIndex);
+      const jobIds: string[] = [];
+      const deliveryNumbers: string[] = [];
 
-    console.log(`Print job queued: ${jobId} (Delivery: ${deliveryNumber})`);
+      // Create a print job for each file
+      for (let i = 0; i < fileURLs.length; i++) {
+        // Generate delivery number for each file
+        const deliveryNumber = generateDeliveryNumber(printerIndex);
 
-    res.json({
-      success: true,
-      message: 'Print job added to queue',
-      jobId,
-      deliveryNumber
-    });
+        // Create print job for this file
+        const printJob = {
+          fileUrl: fileURLs[i],
+          fileName: originalFileNames[i],
+          fileType: fileTypes[i] || 'application/octet-stream',
+          printingOptions: {
+            pageSize: jobData.printingOptions?.pageSize || 'A4',
+            color: jobData.printingOptions?.color || 'bw',
+            sided: jobData.printingOptions?.sided || 'single',
+            copies: jobData.printingOptions?.copies || 1,
+            pageCount: jobData.printingOptions?.pageCount,
+            pageColors: jobData.printingOptions?.pageColors
+          },
+          deliveryNumber,
+          orderId: jobData.orderId,
+          customerInfo: jobData.customerInfo
+        };
+
+        // Add to queue
+        const jobId = addToQueue(printJob, printerIndex);
+        jobIds.push(jobId);
+        deliveryNumbers.push(deliveryNumber);
+
+        console.log(`Print job ${i + 1}/${fileURLs.length} queued: ${jobId} (Delivery: ${deliveryNumber}, File: ${originalFileNames[i]})`);
+      }
+
+      console.log(`✅ All ${fileURLs.length} print jobs queued successfully`);
+
+      res.json({
+        success: true,
+        message: `${fileURLs.length} print jobs added to queue`,
+        jobIds,
+        deliveryNumbers,
+        // Return first delivery number for backward compatibility
+        jobId: jobIds[0],
+        deliveryNumber: deliveryNumbers[0]
+      });
+    } else {
+      // Legacy: single file format (backward compatibility)
+      // Generate delivery number
+      const deliveryNumber = generateDeliveryNumber(printerIndex);
+
+      // Create print job
+      const printJob = {
+        fileUrl: jobData.fileUrl!,
+        fileName: jobData.fileName || 'document.pdf',
+        fileType: jobData.fileType || 'application/pdf',
+        printingOptions: {
+          pageSize: jobData.printingOptions?.pageSize || 'A4',
+          color: jobData.printingOptions?.color || 'bw',
+          sided: jobData.printingOptions?.sided || 'single',
+          copies: jobData.printingOptions?.copies || 1,
+          pageCount: jobData.printingOptions?.pageCount,
+          pageColors: jobData.printingOptions?.pageColors
+        },
+        deliveryNumber,
+        orderId: jobData.orderId,
+        customerInfo: jobData.customerInfo
+      };
+
+      // Add to queue
+      const jobId = addToQueue(printJob, printerIndex);
+
+      console.log(`Print job queued: ${jobId} (Delivery: ${deliveryNumber})`);
+
+      res.json({
+        success: true,
+        message: 'Print job added to queue',
+        jobId,
+        deliveryNumber
+      });
+    }
   } catch (error) {
     console.error('Error adding print job:', error);
     res.status(500).json({
