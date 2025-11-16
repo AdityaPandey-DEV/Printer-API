@@ -444,9 +444,18 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
 
   // For Windows: Use pdf-to-printer for PDFs and images, Word COM for DOCX
   if (isWindows) {
+    // For Word files with mixed color mode, treat as regular color printing
+    // Word files don't support page-level color specification
+    if ((fileExt === '.docx' || fileExt === '.doc') && colorMode === 'mixed') {
+      console.log(`⚠️ Word files don't support mixed color mode with page-level specification. Treating as color mode.`);
+      // Continue to Word COM object printing below - will use color mode
+    }
+    
     if (fileExt === '.pdf' || fileExt === '.jpg' || fileExt === '.jpeg' || fileExt === '.png' || fileExt === '.gif' || fileExt === '.bmp') {
       // Handle mixed color printing for PDFs (maintains page sequence)
-      if (fileExt === '.pdf' && colorMode === 'mixed' && options.pageColors) {
+      // Only process PDFs with valid pageColors structure (colorPages and bwPages arrays)
+      if (fileExt === '.pdf' && colorMode === 'mixed' && options.pageColors && 
+          Array.isArray(options.pageColors.colorPages) && Array.isArray(options.pageColors.bwPages)) {
         try {
           console.log(`🖨️ Printing PDF with mixed color mode (maintaining page sequence)`);
           console.log(`📋 Color pages: ${options.pageColors.colorPages.join(', ')}`);
