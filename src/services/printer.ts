@@ -6,6 +6,7 @@ import { print as printWithPdfToPrinter, getPrinters } from 'pdf-to-printer';
 import { PDFDocument } from 'pdf-lib';
 import { generateFileNumberPage, generateLetterSeparator } from '../utils/printerUtils';
 import { shouldPrintLetterSeparator, getCurrentLetter, getCurrentFileNumber } from './deliveryNumber';
+import { v4 as uuidv4 } from 'uuid';
 
 const execAsync = promisify(exec);
 
@@ -309,6 +310,57 @@ async function tryFallbackPrintMethod(filePath: string, printerName: string, opt
 }
 
 /**
+ * Convert Word file (DOCX/DOC) to PDF using LibreOffice
+ */
+async function convertWordToPdf(wordFilePath: string): Promise<string> {
+  try {
+    console.log(`🔄 Converting Word file to PDF using LibreOffice: ${wordFilePath}`);
+    
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    const fileExt = path.extname(wordFilePath).toLowerCase();
+    const baseName = path.basename(wordFilePath, fileExt);
+    const pdfPath = path.join(tempDir, `${baseName}_${uuidv4()}.pdf`);
+    
+    // Convert Word to PDF using LibreOffice CLI
+    // Use 'soffice' command (works on Windows, Linux, Mac)
+    const command = `soffice --headless --convert-to pdf --outdir "${tempDir}" "${wordFilePath}"`;
+    console.log(`Running LibreOffice command: ${command}`);
+    
+    const { stdout, stderr } = await execAsync(command);
+    
+    if (stderr && !stderr.includes('Warning') && !stderr.includes('Info')) {
+      console.warn('LibreOffice stderr:', stderr);
+    }
+    
+    console.log('LibreOffice stdout:', stdout);
+    
+    // LibreOffice creates PDF with same base name in the output directory
+    const expectedPdfPath = path.join(tempDir, `${baseName}.pdf`);
+    
+    // Check if PDF was created
+    if (!fs.existsSync(expectedPdfPath)) {
+      throw new Error('LibreOffice conversion failed - no PDF file created');
+    }
+    
+    // If the expected path is different from what we want, rename it
+    if (expectedPdfPath !== pdfPath) {
+      fs.renameSync(expectedPdfPath, pdfPath);
+    }
+    
+    console.log(`✅ Word to PDF conversion successful: ${pdfPath}`);
+    return pdfPath;
+    
+  } catch (error: any) {
+    console.error(`❌ Error converting Word to PDF with LibreOffice: ${error.message}`);
+    throw new Error(`Word to PDF conversion failed: ${error.message}`);
+  }
+}
+
+/**
  * Print PDF with mixed color pages in sequence (maintains page order)
  */
 async function printPdfWithMixedColorInSequence(
@@ -518,8 +570,64 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
         throw new Error(`Print failed: ${error.message}`);
       }
     } else if (fileExt === '.docx' || fileExt === '.doc') {
-      // For DOCX: Use Word COM object (keep existing method)
-      // This will continue to the command-based approach below
+      // For Word files: Convert to PDF first using LibreOffice, then print as PDF
+      try {
+        console.log(`🔄 Converting Word file to PDF before printing: ${filePath}`);
+        const pdfPath = await convertWordToPdf(filePath);
+        
+        // Now print the converted PDF
+        console.log(`🖨️ Printing converted PDF: ${pdfPath}`);
+        
+        // Handle mixed color printing for converted PDFs if needed
+        if (colorMode === 'mixed' && options.pageColors && 
+            Array.isArray(options.pageColors.colorPages) && Array.isArray(options.pageColors.bwPages)) {
+          const tempDir = path.join(process.cwd(), 'temp');
+          await printPdfWithMixedColorInSequence(
+            pdfPath,
+            options.pageColors.colorPages,
+            options.pageColors.bwPages,
+            printerName,
+            copies,
+            pageSize,
+            sided,
+            tempDir
+          );
+        } else {
+          // Regular PDF printing
+          const printOptions: any = {
+            printer: printerName,
+            copies: copies,
+            monochrome: colorMode === 'bw',
+            paperSize: pageSize === 'A3' ? 'A3' : 'A4'
+          };
+          
+          if (sided === 'double') {
+            printOptions.duplex = 'duplexlong';
+          }
+          
+          await printWithPdfToPrinter(pdfPath, printOptions);
+        }
+        
+        // Clean up converted PDF file
+        try {
+          if (fs.existsSync(pdfPath)) {
+            fs.unlinkSync(pdfPath);
+            console.log(`🗑️ Cleaned up temporary PDF: ${pdfPath}`);
+          }
+        } catch (cleanupError) {
+          console.warn(`⚠️ Could not clean up temporary PDF: ${cleanupError}`);
+        }
+        
+        // Wait a bit for the print job to be queued
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        console.log(`✅ Word file printed successfully (converted to PDF first)`);
+        return; // Success, exit early
+        
+      } catch (conversionError: any) {
+        console.error(`❌ Word to PDF conversion failed: ${conversionError.message}`);
+        console.log(`⚠️ Falling back to Word COM object printing...`);
+        // Fall through to Word COM object method below
+      }
     }
   }
 
@@ -527,7 +635,7 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   let printCommand: string;
 
   if (isWindows) {
-    // Windows: Use Word COM object for DOCX, default application for other types
+    // Windows: Use Word COM object for DOCX (fallback if conversion failed), default application for other types
     const escapedPrinterName = printerName.replace(/'/g, "''").replace(/\\/g, '\\\\');
     const escapedFilePath = filePath.replace(/'/g, "''").replace(/\\/g, '\\\\');
     
