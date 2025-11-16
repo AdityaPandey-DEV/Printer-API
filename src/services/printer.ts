@@ -310,6 +310,29 @@ async function tryFallbackPrintMethod(filePath: string, printerName: string, opt
 }
 
 /**
+ * Find LibreOffice executable path on Windows
+ */
+function findLibreOfficePath(): string | null {
+  if (process.platform === 'win32') {
+    // Common installation paths on Windows
+    const possiblePaths = [
+      'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
+      'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
+      process.env['PROGRAMFILES'] + '\\LibreOffice\\program\\soffice.exe',
+      process.env['PROGRAMFILES(X86)'] + '\\LibreOffice\\program\\soffice.exe'
+    ];
+    
+    for (const possiblePath of possiblePaths) {
+      if (possiblePath && fs.existsSync(possiblePath)) {
+        console.log(`✅ Found LibreOffice at: ${possiblePath}`);
+        return possiblePath;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Convert Word file (DOCX/DOC) to PDF using LibreOffice
  */
 async function convertWordToPdf(wordFilePath: string): Promise<string> {
@@ -325,9 +348,19 @@ async function convertWordToPdf(wordFilePath: string): Promise<string> {
     const baseName = path.basename(wordFilePath, fileExt);
     const pdfPath = path.join(tempDir, `${baseName}_${uuidv4()}.pdf`);
     
+    // Find LibreOffice executable
+    let sofficeCommand = 'soffice';
+    if (process.platform === 'win32') {
+      const libreOfficePath = findLibreOfficePath();
+      if (libreOfficePath) {
+        sofficeCommand = `"${libreOfficePath}"`;
+      } else {
+        console.warn('⚠️ LibreOffice not found in standard locations, trying PATH...');
+      }
+    }
+    
     // Convert Word to PDF using LibreOffice CLI
-    // Use 'soffice' command (works on Windows, Linux, Mac)
-    const command = `soffice --headless --convert-to pdf --outdir "${tempDir}" "${wordFilePath}"`;
+    const command = `${sofficeCommand} --headless --convert-to pdf --outdir "${tempDir}" "${wordFilePath}"`;
     console.log(`Running LibreOffice command: ${command}`);
     
     const { stdout, stderr } = await execAsync(command);
@@ -640,21 +673,16 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
     const escapedFilePath = filePath.replace(/'/g, "''").replace(/\\/g, '\\\\');
     
     if (fileExt === '.docx' || fileExt === '.doc') {
-      // For DOCX: Use Word COM object to print with all options
-      // Word.PrintOut parameters:
-      // Background, Append, Range, OutputFileName, From, To, Item, Copies, Pages, PageType, PrintToFile, Collate, FileName, ActivePrinterMacGX, ManualDuplexPrint, PrintZoomColumn, PrintZoomRow, PrintZoomPaperWidth, PrintZoomPaperHeight
+      // For DOCX: Use Word COM object to print with basic options
+      // Simplified version that works with all Word versions
+      // Word.PrintOut parameters: Background, Append, Range, OutputFileName, From, To, Item, Copies, Pages, PageType, PrintToFile, Collate, FileName, ActivePrinterMacGX, ManualDuplexPrint
       
       // Determine duplex mode (0=None, 1=Long-edge, 2=Short-edge)
       const duplexMode = sided === 'double' ? 1 : 0; // 1 = Long-edge binding for double-sided
       
-      // Determine color mode (True=Color, False=Grayscale)
-      // For 'mixed', use color mode (let printer handle it)
-      const useColor = colorMode !== 'bw'; // True for 'color' or 'mixed'
-      
-      // Build PrintOut command with all options
-      // Parameters: Background, Append, Range, OutputFileName, From, To, Item, Copies, Pages, PageType, PrintToFile, Collate, FileName, ActivePrinterMacGX, ManualDuplexPrint, PrintZoomColumn, PrintZoomRow, PrintZoomPaperWidth, PrintZoomPaperHeight
-      const useColorStr = useColor ? '$true' : '$false';
-      printCommand = `powershell -Command "$word = New-Object -ComObject Word.Application; $word.Visible = $false; $doc = $word.Documents.Open('${escapedFilePath}'); $word.ActivePrinter = '${escapedPrinterName}'; $word.Options.PrintBackgroundColors = ${useColorStr}; $word.Options.PrintBackgroundImages = ${useColorStr}; $word.Options.PrintInColor = ${useColorStr}; $doc.PrintOut([ref]$false, [ref]$false, [ref]0, [ref]'', [ref]0, [ref]0, [ref]0, [ref]${copies}, [ref]'', [ref]0, [ref]$false, [ref]$true, [ref]'', [ref]'', [ref]${duplexMode}, [ref]0, [ref]0, [ref]0, [ref]0); $doc.Close([ref]$false); $word.Quit([ref]$false)"`;
+      // Simplified PrintOut command - removed problematic Options properties that don't exist in all Word versions
+      // Using only essential parameters: Background, Append, Range, OutputFileName, From, To, Item, Copies, Pages, PageType, PrintToFile, Collate, FileName, ActivePrinterMacGX, ManualDuplexPrint
+      printCommand = `powershell -Command "$word = New-Object -ComObject Word.Application; $word.Visible = $false; $doc = $word.Documents.Open('${escapedFilePath}'); $word.ActivePrinter = '${escapedPrinterName}'; $doc.PrintOut([ref]$false, [ref]$false, [ref]0, [ref]'', [ref]0, [ref]0, [ref]0, [ref]${copies}, [ref]'', [ref]0, [ref]$false, [ref]$true, [ref]'', [ref]'', [ref]${duplexMode}); $doc.Close([ref]$false); $word.Quit([ref]$false)"`;
     } else {
       // For other file types: Try default application
       printCommand = `powershell -Command "$file = '${escapedFilePath}'; Start-Process -FilePath $file -Verb Print -WindowStyle Hidden"`;
