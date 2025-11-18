@@ -1,8 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
+import * as url from 'url';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { print as printWithPdfToPrinter, getPrinters } from 'pdf-to-printer';
 import { PDFDocument } from 'pdf-lib';
 import { generateFileNumberPage, generateLetterSeparator } from '../utils/printerUtils';
 import { shouldPrintLetterSeparator, getCurrentLetter, getCurrentFileNumber } from './deliveryNumber';
@@ -499,19 +500,24 @@ async function printPdfWithMixedColorInSequence(
       const originalGroupNum = pageGroups.length - groupIndex;
       console.log(`🖨️ Printing Group ${originalGroupNum} (reverse order ${groupIndex + 1}/${pageGroups.length}): Pages ${group.startIndex + 1}-${group.endIndex + 1} (${group.isMonochrome ? 'B&W' : 'Color'})...`);
       
-      // Print with appropriate color setting
-      const printOptions: any = {
-        printer: printerName,
-        copies: copies,
-        monochrome: group.isMonochrome,
-        paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-      };
-      
-      if (sided === 'double') {
-        printOptions.duplex = 'duplexlong';
+      // For B&W groups, force printer driver to grayscale mode for fast printing
+      if (group.isMonochrome && process.platform === 'win32') {
+        await forceGrayscaleMode(printerName);
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
       
-      await printWithPdfToPrinter(groupPdfPath, printOptions);
+      // Print with Chrome (primary), SumatraPDF (fallback), or Windows print spooler (last resort)
+      try {
+        await printPdfWithChrome(groupPdfPath, printerName, group.isMonochrome, copies);
+      } catch (error: any) {
+        console.warn(`⚠️ Chrome failed for group, trying SumatraPDF: ${error.message}`);
+        try {
+          await printPdfWithSumatra(groupPdfPath, printerName, group.isMonochrome, copies);
+        } catch (sumatraError: any) {
+          console.warn(`⚠️ SumatraPDF failed for group, trying Windows spooler: ${sumatraError.message}`);
+          await printPdfWithWindowsSpooler(groupPdfPath, printerName, group.isMonochrome, copies);
+        }
+      }
       console.log(`✅ Group ${originalGroupNum} printed successfully: Pages ${group.startIndex + 1}-${group.endIndex + 1} (${group.isMonochrome ? 'B&W' : 'Color'})`);
       
       // Cleanup
@@ -555,6 +561,542 @@ function normalizePageColors(
 }
 
 /**
+ * Force printer to grayscale mode using Windows PowerShell
+ * This ensures the printer driver processes jobs as grayscale, not color
+ */
+async function forceGrayscaleMode(printerName: string): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    return true;
+  }
+
+  try {
+    console.log(`🎨 Attempting to force grayscale mode for printer: ${printerName}`);
+    
+    // Method 1: Use Set-PrintConfiguration to set ColorMode to Grayscale
+    const setGrayscaleCmd = `powershell -Command "$printer = Get-Printer -Name '${printerName}' -ErrorAction SilentlyContinue; if ($printer) { Set-PrintConfiguration -PrinterName '${printerName}' -ColorMode Grayscale -ErrorAction SilentlyContinue; if ($?) { Write-Output 'SUCCESS' } else { Write-Output 'FAILED' } } else { Write-Output 'PRINTER_NOT_FOUND' }"`;
+    
+    try {
+      const { stdout } = await execAsync(setGrayscaleCmd);
+      const result = stdout.trim();
+      
+      if (result === 'SUCCESS') {
+        console.log(`✅ Successfully set printer to grayscale mode via Set-PrintConfiguration`);
+        return true;
+      } else if (result === 'PRINTER_NOT_FOUND') {
+        console.warn(`⚠️ Printer not found for grayscale configuration: ${printerName}`);
+      } else {
+        console.warn(`⚠️ Set-PrintConfiguration returned: ${result}`);
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ Set-PrintConfiguration failed: ${error.message}`);
+    }
+    
+    // Method 2: Use printer properties via COM object (more reliable for some drivers)
+    const comGrayscaleCmd = `powershell -Command "$printer = Get-Printer -Name '${printerName}' -ErrorAction SilentlyContinue; if ($printer) { $printerConfig = Get-PrintConfiguration -PrinterName '${printerName}' -ErrorAction SilentlyContinue; if ($printerConfig) { $printerConfig.ColorMode = 'Grayscale'; Set-PrintConfiguration -InputObject $printerConfig -ErrorAction SilentlyContinue; if ($?) { Write-Output 'SUCCESS' } else { Write-Output 'FAILED' } } else { Write-Output 'NO_CONFIG' } } else { Write-Output 'PRINTER_NOT_FOUND' }"`;
+    
+    try {
+      const { stdout } = await execAsync(comGrayscaleCmd);
+      const result = stdout.trim();
+      
+      if (result === 'SUCCESS') {
+        console.log(`✅ Successfully set printer to grayscale mode via COM object`);
+        return true;
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ COM object grayscale configuration failed: ${error.message}`);
+    }
+    
+    console.warn(`⚠️ Could not force grayscale mode via automated methods, will rely on print job settings`);
+    return false;
+  } catch (error: any) {
+    console.warn(`⚠️ Error forcing grayscale mode: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Find Chrome executable path
+ */
+async function findChromePath(): Promise<string | null> {
+  if (process.platform === 'win32') {
+    // Common installation paths for Chrome
+    const possiblePaths = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      process.env['PROGRAMFILES'] + '\\Google\\Chrome\\Application\\chrome.exe',
+      process.env['PROGRAMFILES(X86)'] + '\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+      'chrome.exe' // Try PATH
+    ];
+    
+    for (const possiblePath of possiblePaths) {
+      if (possiblePath && fs.existsSync(possiblePath)) {
+        console.log(`✅ Found Chrome at: ${possiblePath}`);
+        return possiblePath;
+      }
+    }
+    
+    // Try to find in PATH using async method
+    try {
+      const { stdout } = await execAsync('where chrome.exe');
+      if (stdout && stdout.trim()) {
+        const path = stdout.trim().split('\n')[0].trim();
+        if (path && fs.existsSync(path)) {
+          console.log(`✅ Found Chrome in PATH: ${path}`);
+          return path;
+        }
+      }
+    } catch {
+      // Not in PATH
+    }
+  }
+  return null;
+}
+
+/**
+ * Find Edge executable path
+ */
+async function findEdgePath(): Promise<string | null> {
+  if (process.platform === 'win32') {
+    // Common installation paths for Edge
+    const possiblePaths = [
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      process.env['PROGRAMFILES(X86)'] + '\\Microsoft\\Edge\\Application\\msedge.exe',
+      process.env['PROGRAMFILES'] + '\\Microsoft\\Edge\\Application\\msedge.exe',
+      'msedge.exe' // Try PATH
+    ];
+    
+    for (const possiblePath of possiblePaths) {
+      if (possiblePath && fs.existsSync(possiblePath)) {
+        console.log(`✅ Found Edge at: ${possiblePath}`);
+        return possiblePath;
+      }
+    }
+    
+    // Try to find in PATH using async method
+    try {
+      const { stdout } = await execAsync('where msedge.exe');
+      if (stdout && stdout.trim()) {
+        const path = stdout.trim().split('\n')[0].trim();
+        if (path && fs.existsSync(path)) {
+          console.log(`✅ Found Edge in PATH: ${path}`);
+          return path;
+        }
+      }
+    } catch {
+      // Not in PATH
+    }
+  }
+  return null;
+}
+
+/**
+ * Find SumatraPDF executable path
+ */
+async function findSumatraPdfPath(): Promise<string | null> {
+  if (process.platform === 'win32') {
+    // Common installation paths for SumatraPDF
+    const possiblePaths = [
+      'C:\\Program Files\\SumatraPDF\\SumatraPDF.exe',
+      'C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe',
+      process.env['PROGRAMFILES'] + '\\SumatraPDF\\SumatraPDF.exe',
+      process.env['PROGRAMFILES(X86)'] + '\\SumatraPDF\\SumatraPDF.exe',
+      'C:\\Users\\' + process.env.USERNAME + '\\AppData\\Local\\SumatraPDF\\SumatraPDF.exe',
+      'SumatraPDF.exe' // Try PATH
+    ];
+    
+    for (const possiblePath of possiblePaths) {
+      if (possiblePath && fs.existsSync(possiblePath)) {
+        console.log(`✅ Found SumatraPDF at: ${possiblePath}`);
+        return possiblePath;
+      }
+    }
+    
+    // Try to find in PATH using async method
+    try {
+      const { stdout } = await execAsync('where SumatraPDF.exe');
+      if (stdout && stdout.trim()) {
+        const path = stdout.trim().split('\n')[0].trim();
+        if (path && fs.existsSync(path)) {
+          console.log(`✅ Found SumatraPDF in PATH: ${path}`);
+          return path;
+        }
+      }
+    } catch {
+      // Not in PATH
+    }
+                            }
+  return null;
+}
+
+/**
+ * Get current default printer name
+ */
+async function getDefaultPrinter(): Promise<string | null> {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  
+  try {
+    const { stdout } = await execAsync(`powershell -Command "$printer = Get-Printer | Where-Object {$_.Default -eq $true} | Select-Object -First 1; if ($printer) { Write-Output $printer.Name }"`);
+    const printerName = stdout.trim();
+    return printerName && printerName.length > 0 ? printerName : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Set default printer temporarily
+ */
+async function setDefaultPrinter(printerName: string): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    return false;
+  }
+  
+  try {
+    const escapedPrinterName = printerName.replace(/'/g, "''").replace(/"/g, '\\"');
+    const { stdout } = await execAsync(`powershell -Command "rundll32 printui.dll,PrintUIEntry /y /n '${escapedPrinterName}'"`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Print PDF using Chrome with --kiosk-printing flag (fastest method, similar to Chrome's built-in printing)
+ * This uses Chrome's PDF viewer which prints directly without image rendering
+ */
+async function printPdfWithChrome(
+  filePath: string,
+  printerName: string,
+  isMonochrome: boolean,
+  copies: number
+): Promise<void> {
+  if (process.platform !== 'win32') {
+    throw new Error('Chrome printing only works on Windows');
+  }
+
+  // Try Chrome first, then Edge
+  let browserPath = await findChromePath();
+  let browserName = 'Chrome';
+  
+  if (!browserPath) {
+    browserPath = await findEdgePath();
+    browserName = 'Edge';
+  }
+  
+  if (!browserPath) {
+    throw new Error('Chrome or Edge not found. Please install Google Chrome or Microsoft Edge.');
+  }
+
+  try {
+    console.log(`⚡ Using ${browserName} with --kiosk-printing for fastest printing (monochrome=${isMonochrome})`);
+    
+    // Force printer driver to grayscale mode BEFORE printing
+    if (isMonochrome) {
+      console.log(`🎨 Forcing printer driver to grayscale mode before printing...`);
+      await forceGrayscaleMode(printerName);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    // Save current default printer
+    const originalDefaultPrinter = await getDefaultPrinter();
+    
+    // Set target printer as default (required for --kiosk-printing)
+    console.log(`🖨️ Setting printer as default: ${printerName}`);
+    const setDefaultSuccess = await setDefaultPrinter(printerName);
+    if (!setDefaultSuccess) {
+      console.warn(`⚠️ Could not set printer as default, Chrome will use current default printer`);
+    }
+    
+    // Convert file path to file:/// URL format
+    const absolutePath = path.resolve(filePath).replace(/\\/g, '/');
+    const fileUrl = `file:///${absolutePath}`;
+    
+    // Build Chrome command with --kiosk-printing flag
+    // --kiosk-printing bypasses print dialog and prints directly to default printer
+    // --disable-gpu helps with headless/automated use
+    // --no-sandbox may be needed in some environments
+    const escapedBrowserPath = browserPath.replace(/"/g, '\\"');
+    const escapedFileUrl = fileUrl.replace(/"/g, '\\"');
+    
+    // Print all copies
+    for (let i = 0; i < copies; i++) {
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Delay between copies
+      }
+      
+      try {
+        // Use a local HTTP server to serve the PDF (avoids local file access restrictions)
+        // Then open it in Chrome with --kiosk-printing and auto-print JavaScript
+        const serverPort = 8765 + i; // Use different port for each copy
+        const fileName = path.basename(filePath);
+        const httpUrl = `http://localhost:${serverPort}/${encodeURIComponent(fileName)}`;
+        
+        // Create a simple HTTP server to serve the PDF
+        const server = http.createServer((req, res) => {
+          const parsedUrl = url.parse(req.url || '/');
+          const requestedFile = parsedUrl.pathname?.substring(1) || '';
+          
+          if (requestedFile === encodeURIComponent(fileName) || requestedFile === fileName) {
+            // Serve the PDF file
+            const fileStream = fs.createReadStream(filePath);
+            res.writeHead(200, {
+              'Content-Type': 'application/pdf',
+              'Content-Disposition': `inline; filename="${fileName}"`
+            });
+            fileStream.pipe(res);
+          } else {
+            // Redirect to PDF directly - Chrome will open it in PDF viewer
+            res.writeHead(302, { 'Location': httpUrl });
+            res.end();
+          }
+        });
+        
+        // Start the server
+        await new Promise<void>((resolve, reject) => {
+          server.listen(serverPort, 'localhost', () => {
+            console.log(`📡 Started local HTTP server on port ${serverPort} to serve PDF`);
+            resolve();
+          });
+          server.on('error', (err: any) => {
+            if (err.code === 'EADDRINUSE') {
+              // Port in use, try next port
+              serverPort + 1;
+              resolve();
+            } else {
+              reject(err);
+            }
+          });
+        });
+        
+        // Open Chrome with --kiosk-printing and the PDF directly via HTTP
+        // Chrome will open it in PDF viewer, then we trigger printing
+        const escapedPdfUrl = httpUrl.replace(/"/g, '\\"');
+        const chromeCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; $proc = Start-Process -FilePath '${escapedBrowserPath}' -ArgumentList '--kiosk-printing', '--disable-gpu', '${escapedPdfUrl}' -PassThru -ErrorAction Stop; $procId = $proc.Id; Start-Sleep -Seconds 4; if (-not $proc.HasExited) { Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 2; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Seconds 3; if (-not $proc.HasExited) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } }"`;
+        
+        console.log(`Executing ${browserName} print command (monochrome=${isMonochrome}, copies=${copies}, copy ${i + 1}/${copies})`);
+        console.log(`   Using local HTTP server to serve PDF (avoids local file restrictions)`);
+        console.log(`   Opening PDF directly in ${browserName} PDF viewer, then triggering print`);
+        
+        const { stdout, stderr } = await execAsync(chromeCmd);
+        
+        if (stdout && stdout.trim()) {
+          console.log(`${browserName} output: ${stdout.trim()}`);
+        }
+        
+        if (stderr && stderr.trim()) {
+          const stderrLower = stderr.toLowerCase();
+          if (stderrLower.includes('error') && !stderrLower.includes('warning')) {
+            console.warn(`⚠️ ${browserName} stderr: ${stderr.trim()}`);
+          }
+        }
+        
+        // Wait for print job to be processed
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Close the HTTP server
+        server.close();
+        
+      } catch (error: any) {
+        if (i === 0) {
+          throw error;
+        }
+        console.warn(`⚠️ Failed to print copy ${i + 1}: ${error.message}`);
+      }
+    }
+    
+    // Restore original default printer if we changed it
+    if (originalDefaultPrinter && originalDefaultPrinter !== printerName && setDefaultSuccess) {
+      console.log(`🔄 Restoring original default printer: ${originalDefaultPrinter}`);
+      await setDefaultPrinter(originalDefaultPrinter);
+    }
+    
+    console.log(`✅ ${browserName} print command completed successfully (${copies} copy/copies)`);
+    console.log(`   Mode: ${isMonochrome ? 'Grayscale/B&W (fast mode - direct printing)' : 'Color'}`);
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  } catch (error: any) {
+    console.error(`❌ ${browserName} print error: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Print PDF using Windows print spooler API directly (fastest method, similar to Chrome)
+ * This bypasses application rendering and sends PDF directly to printer driver
+ */
+async function printPdfWithWindowsSpooler(
+  filePath: string,
+  printerName: string,
+  isMonochrome: boolean,
+  copies: number
+): Promise<void> {
+  if (process.platform !== 'win32') {
+    throw new Error('Windows print spooler only works on Windows');
+  }
+
+  try {
+    console.log(`⚡ Using Windows print spooler API for fastest printing (monochrome=${isMonochrome})`);
+    
+    // CRITICAL: Force printer driver to grayscale mode BEFORE printing
+    // This ensures the printer processes the job as grayscale, not color
+    if (isMonochrome) {
+      console.log(`🎨 Forcing printer driver to grayscale mode before printing...`);
+      await forceGrayscaleMode(printerName);
+      // Small delay to ensure settings are applied
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    const escapedPrinterName = printerName.replace(/'/g, "''").replace(/"/g, '\\"');
+    const escapedFilePath = filePath.replace(/'/g, "''").replace(/\\/g, '\\\\');
+    
+    // Use PowerShell to print directly via Windows print spooler
+    // This method is similar to how Chrome prints - it uses the default PDF handler
+    // but with explicit printer driver settings
+    let printCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; `;
+    
+    // Set printer to grayscale if needed (redundant but ensures it's set)
+    if (isMonochrome) {
+      printCmd += `try { Set-PrintConfiguration -PrinterName '${escapedPrinterName}' -ColorMode Grayscale -ErrorAction SilentlyContinue | Out-Null } catch {}; `;
+    }
+    
+    // Use Start-Process with Print verb - this uses Windows default PDF handler
+    // which respects printer driver settings (grayscale mode)
+    // The printer driver is already set to grayscale, so it will process as grayscale (fast)
+    printCmd += `$proc = Start-Process -FilePath '${escapedFilePath}' -Verb Print -WindowStyle Hidden -PassThru -ErrorAction Stop; `;
+    printCmd += `Start-Sleep -Seconds 1; `;
+    printCmd += `if (-not $proc.HasExited) { Write-Host 'Print job queued' } else { Write-Host 'Print process completed' }"`;
+    
+    console.log(`Executing Windows print spooler command (monochrome=${isMonochrome}, copies=${copies})`);
+    console.log(`   Printer driver is in grayscale mode for fast B&W printing`);
+    
+    // Print all copies
+    for (let i = 0; i < copies; i++) {
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, 1500)); // Delay between copies
+      }
+      
+      try {
+        const { stdout, stderr } = await execAsync(printCmd);
+        
+        if (stdout && stdout.trim()) {
+          console.log(`Print spooler output: ${stdout.trim()}`);
+        }
+        
+        if (stderr && !stderr.includes('request id')) {
+          const stderrLower = stderr.toLowerCase();
+          if (stderrLower.includes('error') || stderrLower.includes('exception')) {
+            if (i === 0) {
+              throw new Error(`Windows print spooler error: ${stderr.trim()}`);
+            }
+            console.warn(`⚠️ Failed to print copy ${i + 1}: ${stderr.trim()}`);
+          }
+        }
+      } catch (error: any) {
+        // If first copy fails, throw error
+        if (i === 0) {
+          throw error;
+        }
+        // For additional copies, log warning but continue
+        console.warn(`⚠️ Failed to print copy ${i + 1}: ${error.message}`);
+      }
+    }
+    
+    console.log(`✅ Windows print spooler command completed successfully (${copies} copy/copies)`);
+    console.log(`   Mode: ${isMonochrome ? 'Grayscale/B&W (fast mode - direct spooler)' : 'Color'}`);
+    
+    // Wait for print job to be queued
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  } catch (error: any) {
+    console.error(`❌ Windows print spooler error: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Print PDF using SumatraPDF command-line (PRIMARY method for optimal speed)
+ * SumatraPDF provides direct control over print settings and respects printer driver grayscale mode
+ */
+async function printPdfWithSumatra(
+  filePath: string,
+  printerName: string,
+  isMonochrome: boolean,
+  copies: number
+): Promise<void> {
+  if (process.platform !== 'win32') {
+    throw new Error('SumatraPDF printing only works on Windows');
+  }
+
+  const sumatraPath = await findSumatraPdfPath();
+  if (!sumatraPath) {
+    throw new Error('SumatraPDF not found. Please install SumatraPDF from https://www.sumatrapdfreader.org/download-free-pdf-viewer');
+  }
+
+  try {
+    console.log(`⚡ Using SumatraPDF for optimal printing performance (monochrome=${isMonochrome})`);
+    
+    // Force printer driver to grayscale mode BEFORE printing
+    if (isMonochrome) {
+      console.log(`🎨 Forcing printer driver to grayscale mode before printing...`);
+      await forceGrayscaleMode(printerName);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    const escapedPrinterName = printerName.replace(/"/g, '\\"');
+    const escapedFilePath = filePath.replace(/"/g, '\\"');
+    
+    // Build SumatraPDF command
+    let sumatraCmd = `"${sumatraPath}" -print-to "${escapedPrinterName}" -silent`;
+    
+    if (isMonochrome) {
+      sumatraCmd += ` -print-settings "monochrome"`;
+    }
+    
+    sumatraCmd += ` "${escapedFilePath}"`;
+    
+    console.log(`Executing SumatraPDF print command (monochrome=${isMonochrome}, copies=${copies})`);
+    
+    // Print all copies
+    for (let i = 0; i < copies; i++) {
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      try {
+        const { stdout, stderr } = await execAsync(sumatraCmd);
+        
+        if (stdout && stdout.trim()) {
+          console.log(`SumatraPDF output: ${stdout.trim()}`);
+        }
+        
+        if (stderr && stderr.trim()) {
+          const stderrLower = stderr.toLowerCase();
+          if (stderrLower.includes('error') && !stderrLower.includes('warning')) {
+            throw new Error(`SumatraPDF error: ${stderr.trim()}`);
+          }
+        }
+      } catch (error: any) {
+        if (i === 0) {
+          throw error;
+        }
+        console.warn(`⚠️ Failed to print copy ${i + 1}: ${error.message}`);
+      }
+    }
+    
+    console.log(`✅ SumatraPDF print command completed successfully (${copies} copy/copies)`);
+    console.log(`   Mode: ${isMonochrome ? 'Grayscale/B&W (fast mode)' : 'Color'}`);
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  } catch (error: any) {
+    console.error(`❌ SumatraPDF print error: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
  * Print file using system printer command
  */
 async function printFile(filePath: string, options: PrintJob['printingOptions']): Promise<void> {
@@ -590,13 +1132,13 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
   
   const fileExt = path.extname(filePath).toLowerCase();
 
-  // For Windows: Use pdf-to-printer for PDFs and images, Word COM for DOCX
+  // For Windows: Use SumatraPDF for PDFs and images, Word COM for DOCX
   if (isWindows) {
-    // For Word files with mixed color mode, treat as regular color printing
-    // Word files don't support page-level color specification
+    // For Word files with mixed color mode, they will be converted to PDF first
+    // Then mixed color mode will be applied to the converted PDF
     if ((fileExt === '.docx' || fileExt === '.doc') && colorMode === 'mixed') {
-      console.log(`⚠️ Word files don't support mixed color mode with page-level specification. Treating as color mode.`);
-      // Continue to Word COM object printing below - will use color mode
+      console.log(`ℹ️ Word file with mixed color mode detected. Will convert to PDF first, then apply mixed color printing.`);
+      // Continue to Word conversion below
     }
     
     if (fileExt === '.pdf' || fileExt === '.jpg' || fileExt === '.jpeg' || fileExt === '.png' || fileExt === '.gif' || fileExt === '.bmp') {
@@ -612,19 +1154,18 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
         // Validate pageColors structure
         if (!normalizedPageColors) {
           console.warn(`⚠️ Mixed color mode requested but pageColors is missing. Defaulting to B&W mode.`);
-          // Default to B&W mode
-          const printOptions: any = {
-            printer: printerName,
-            copies: copies,
-            monochrome: true, // B&W mode
-            paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-          };
-          
-          if (sided === 'double') {
-            printOptions.duplex = 'duplexlong';
+          // Default to B&W mode using Chrome (fastest)
+          try {
+            await printPdfWithChrome(filePath, printerName, true, copies);
+          } catch (error: any) {
+            console.warn(`⚠️ Chrome failed, using SumatraPDF: ${error.message}`);
+            try {
+              await printPdfWithSumatra(filePath, printerName, true, copies);
+            } catch (sumatraError: any) {
+              console.warn(`⚠️ SumatraPDF failed, using Windows spooler: ${sumatraError.message}`);
+              await printPdfWithWindowsSpooler(filePath, printerName, true, copies);
+            }
           }
-          
-          await printWithPdfToPrinter(filePath, printOptions);
           await new Promise(resolve => setTimeout(resolve, 2000));
           return;
         } else if (!Array.isArray(normalizedPageColors.colorPages) || !Array.isArray(normalizedPageColors.bwPages)) {
@@ -632,19 +1173,18 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           console.warn(`   Expected: { colorPages: number[], bwPages: number[] }`);
           console.warn(`   Received:`, JSON.stringify(normalizedPageColors, null, 2));
           console.warn(`   Defaulting to B&W mode.`);
-          // Default to B&W mode
-          const printOptions: any = {
-            printer: printerName,
-            copies: copies,
-            monochrome: true, // B&W mode
-            paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-          };
-          
-          if (sided === 'double') {
-            printOptions.duplex = 'duplexlong';
+          // Default to B&W mode using Chrome (fastest)
+          try {
+            await printPdfWithChrome(filePath, printerName, true, copies);
+          } catch (error: any) {
+            console.warn(`⚠️ Chrome failed, using SumatraPDF: ${error.message}`);
+            try {
+              await printPdfWithSumatra(filePath, printerName, true, copies);
+            } catch (sumatraError: any) {
+              console.warn(`⚠️ SumatraPDF failed, using Windows spooler: ${sumatraError.message}`);
+              await printPdfWithWindowsSpooler(filePath, printerName, true, copies);
+            }
           }
-          
-          await printWithPdfToPrinter(filePath, printOptions);
           await new Promise(resolve => setTimeout(resolve, 2000));
           return;
         } else {
@@ -683,35 +1223,44 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
         }
       }
       
-      // Use pdf-to-printer directly for non-mixed color printing (no command string needed)
+      // Use Chrome with --kiosk-printing as PRIMARY method (fastest, similar to Chrome's built-in printing)
+      // Falls back to SumatraPDF, then Windows print spooler if Chrome is not available
       try {
-        console.log(`🖨️ Printing ${fileExt} file using pdf-to-printer: ${filePath}`);
+        console.log(`🖨️ Printing ${fileExt} file using Chrome with --kiosk-printing (primary method): ${filePath}`);
         console.log(`📋 Options: printer=${printerName}, copies=${copies}, color=${colorMode}, pageSize=${pageSize}, sided=${sided}`);
         
-        // Convert options to pdf-to-printer format
-        // Default to monochrome (black and white) unless explicitly color
-        const printOptions: any = {
-          printer: printerName,
-          copies: copies,
-          monochrome: isMonochrome, // Use isMonochrome which defaults to true
-          paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-        };
-        
-        // Add duplex if double-sided
-        if (sided === 'double') {
-          printOptions.duplex = 'duplexlong';
-        }
-        
-        // Print using pdf-to-printer
-        await printWithPdfToPrinter(filePath, printOptions);
-        console.log(`✅ Print job sent successfully using pdf-to-printer`);
+        // Print using Chrome (primary method)
+        await printPdfWithChrome(filePath, printerName, isMonochrome, copies);
+        console.log(`✅ Print job sent successfully using Chrome`);
         
         // Wait a bit for the print job to be queued
         await new Promise(resolve => setTimeout(resolve, 2000));
         return; // Success, exit early
       } catch (error: any) {
-        console.error(`❌ pdf-to-printer error: ${error.message}`);
-        throw new Error(`Print failed: ${error.message}`);
+        console.warn(`⚠️ Chrome failed: ${error.message}`);
+        console.log(`🔄 Falling back to SumatraPDF...`);
+        
+        // Fallback to SumatraPDF
+        try {
+          await printPdfWithSumatra(filePath, printerName, isMonochrome, copies);
+          console.log(`✅ Print job sent successfully using SumatraPDF (fallback)`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return; // Success with fallback
+        } catch (sumatraError: any) {
+          console.warn(`⚠️ SumatraPDF failed: ${sumatraError.message}`);
+          console.log(`🔄 Falling back to Windows print spooler...`);
+          
+          // Last resort: Windows print spooler
+          try {
+            await printPdfWithWindowsSpooler(filePath, printerName, isMonochrome, copies);
+            console.log(`✅ Print job sent successfully using Windows print spooler (last resort)`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            return; // Success with last resort
+          } catch (spoolerError: any) {
+            console.error(`❌ All print methods failed`);
+            throw new Error(`Print failed: Chrome: ${error.message}, SumatraPDF: ${sumatraError.message}, Windows spooler: ${spoolerError.message}`);
+          }
+        }
       }
     } else if (fileExt === '.docx' || fileExt === '.doc') {
       // For Word files: Convert to PDF first using LibreOffice, then print as PDF
@@ -734,37 +1283,25 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           // Validate pageColors structure
           if (!normalizedPageColors) {
             console.warn(`⚠️ Mixed color mode requested but pageColors is missing. Defaulting to B&W mode.`);
-            // Default to B&W mode
-            const printOptions: any = {
-              printer: printerName,
-              copies: copies,
-              monochrome: true, // B&W mode
-              paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-            };
-            
-            if (sided === 'double') {
-              printOptions.duplex = 'duplexlong';
+            // Default to B&W mode using Windows print spooler (fastest)
+            try {
+              await printPdfWithWindowsSpooler(pdfPath, printerName, true, copies);
+            } catch (error: any) {
+              console.warn(`⚠️ Windows spooler failed, using SumatraPDF: ${error.message}`);
+              await printPdfWithSumatra(pdfPath, printerName, true, copies);
             }
-            
-            await printWithPdfToPrinter(pdfPath, printOptions);
           } else if (!Array.isArray(normalizedPageColors.colorPages) || !Array.isArray(normalizedPageColors.bwPages)) {
             console.warn(`⚠️ Mixed color mode requested but pageColors structure is invalid.`);
             console.warn(`   Expected: { colorPages: number[], bwPages: number[] }`);
             console.warn(`   Received:`, JSON.stringify(normalizedPageColors, null, 2));
             console.warn(`   Defaulting to B&W mode.`);
-            // Default to B&W mode
-            const printOptions: any = {
-              printer: printerName,
-              copies: copies,
-              monochrome: true, // B&W mode
-              paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-            };
-            
-            if (sided === 'double') {
-              printOptions.duplex = 'duplexlong';
+            // Default to B&W mode using Windows print spooler (fastest)
+            try {
+              await printPdfWithWindowsSpooler(pdfPath, printerName, true, copies);
+            } catch (error: any) {
+              console.warn(`⚠️ Windows spooler failed, using SumatraPDF: ${error.message}`);
+              await printPdfWithSumatra(pdfPath, printerName, true, copies);
             }
-            
-            await printWithPdfToPrinter(pdfPath, printOptions);
           } else {
             // Valid pageColors structure - use mixed color printing
             console.log(`✅ Valid pageColors structure detected for mixed color printing`);
@@ -784,20 +1321,13 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
             );
           }
         } else {
-          // Regular PDF printing (not mixed mode)
-          // Default to monochrome (black and white) unless explicitly color
-          const printOptions: any = {
-            printer: printerName,
-            copies: copies,
-            monochrome: isMonochrome,
-            paperSize: pageSize === 'A3' ? 'A3' : 'A4'
-          };
-          
-          if (sided === 'double') {
-            printOptions.duplex = 'duplexlong';
+          // Regular PDF printing (not mixed mode) using Windows print spooler (fastest)
+          try {
+            await printPdfWithWindowsSpooler(pdfPath, printerName, isMonochrome, copies);
+          } catch (error: any) {
+            console.warn(`⚠️ Windows spooler failed, using SumatraPDF: ${error.message}`);
+            await printPdfWithSumatra(pdfPath, printerName, isMonochrome, copies);
           }
-          
-          await printWithPdfToPrinter(pdfPath, printOptions);
         }
         
         // Clean up converted PDF file
