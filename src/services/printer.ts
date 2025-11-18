@@ -841,13 +841,37 @@ async function printPdfWithChrome(
           const requestedFile = parsedUrl.pathname?.substring(1) || '';
           
           if (requestedFile === encodeURIComponent(fileName) || requestedFile === fileName) {
+            // Check if file exists before trying to serve it
+            if (!fs.existsSync(filePath)) {
+              console.error(`❌ File not found: ${filePath}`);
+              res.writeHead(404, { 'Content-Type': 'text/plain' });
+              res.end('File not found');
+              return;
+            }
+            
             // Serve the PDF file
-            const fileStream = fs.createReadStream(filePath);
-            res.writeHead(200, {
-              'Content-Type': 'application/pdf',
-              'Content-Disposition': `inline; filename="${fileName}"`
-            });
-            fileStream.pipe(res);
+            try {
+              const fileStream = fs.createReadStream(filePath);
+              fileStream.on('error', (err: any) => {
+                console.error(`❌ Error reading file: ${err.message}`);
+                if (!res.headersSent) {
+                  res.writeHead(500, { 'Content-Type': 'text/plain' });
+                  res.end('Error reading file');
+                }
+              });
+              
+              res.writeHead(200, {
+                'Content-Type': 'application/pdf',
+                'Content-Disposition': `inline; filename="${fileName}"`
+              });
+              fileStream.pipe(res);
+            } catch (error: any) {
+              console.error(`❌ Error serving file: ${error.message}`);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'text/plain' });
+                res.end('Error serving file');
+              }
+            }
           } else {
             // Redirect to PDF directly - Chrome will open it in PDF viewer
             res.writeHead(302, { 'Location': httpUrl });
@@ -875,30 +899,69 @@ async function printPdfWithChrome(
         // Open Chrome with --kiosk-printing and the PDF directly via HTTP
         // Chrome will open it in PDF viewer, then we trigger printing
         const escapedPdfUrl = httpUrl.replace(/"/g, '\\"');
-        const chromeCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; $proc = Start-Process -FilePath '${escapedBrowserPath}' -ArgumentList '--kiosk-printing', '--disable-gpu', '${escapedPdfUrl}' -PassThru -ErrorAction Stop; $procId = $proc.Id; Start-Sleep -Seconds 4; if (-not $proc.HasExited) { Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 2; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Seconds 3; if (-not $proc.HasExited) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue } }"`;
+        
+        // Check if file exists before proceeding
+        if (!fs.existsSync(filePath)) {
+          throw new Error(`File not found: ${filePath}`);
+        }
+        
+        // Calculate wait time based on file size (larger files need more time)
+        const fileStats = fs.statSync(filePath);
+        const fileSizeMB = fileStats.size / (1024 * 1024);
+        const baseWaitTime = 5; // Base wait time in seconds
+        const sizeBasedWait = Math.max(0, Math.ceil(fileSizeMB * 2)); // 2 seconds per MB
+        const totalWaitTime = baseWaitTime + sizeBasedWait;
         
         console.log(`Executing ${browserName} print command (monochrome=${isMonochrome}, copies=${copies}, copy ${i + 1}/${copies})`);
         console.log(`   Using local HTTP server to serve PDF (avoids local file restrictions)`);
         console.log(`   Opening PDF directly in ${browserName} PDF viewer, then triggering print`);
+        console.log(`   File size: ${fileSizeMB.toFixed(2)} MB - will wait ${totalWaitTime} seconds for PDF to load`);
         
-        const { stdout, stderr } = await execAsync(chromeCmd);
+        // Launch Chrome and keep it running
+        const chromeCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; $proc = Start-Process -FilePath '${escapedBrowserPath}' -ArgumentList '--kiosk-printing', '--disable-gpu', '${escapedPdfUrl}' -PassThru -ErrorAction Stop; $procId = $proc.Id; Write-Output $procId"`;
         
-        if (stdout && stdout.trim()) {
-          console.log(`${browserName} output: ${stdout.trim()}`);
+        const { stdout } = await execAsync(chromeCmd);
+        const procId = stdout.trim();
+        console.log(`   Chrome process started with PID: ${procId}`);
+        
+        // Wait for PDF to fully load (longer for larger files)
+        console.log(`   Waiting ${totalWaitTime} seconds for PDF to load...`);
+        await new Promise(resolve => setTimeout(resolve, totalWaitTime * 1000));
+        
+        // Trigger printing
+        try {
+          const printCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 2; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Write-Output 'Print command sent' } else { Write-Output 'Process not found or exited' }"`;
+          
+          const printResult = await execAsync(printCmd);
+          console.log(`   Print command result: ${printResult.stdout.trim()}`);
+        } catch (printError: any) {
+          console.warn(`   ⚠️ Failed to send print command: ${printError.message}`);
         }
         
-        if (stderr && stderr.trim()) {
-          const stderrLower = stderr.toLowerCase();
-          if (stderrLower.includes('error') && !stderrLower.includes('warning')) {
-            console.warn(`⚠️ ${browserName} stderr: ${stderr.trim()}`);
-          }
+        // Wait for print job to be queued and processed (longer for larger files)
+        const printWaitTime = Math.max(5, Math.ceil(fileSizeMB * 3)); // 3 seconds per MB minimum 5 seconds
+        console.log(`   Waiting ${printWaitTime} seconds for print job to be processed...`);
+        await new Promise(resolve => setTimeout(resolve, printWaitTime * 1000));
+        
+        // Keep Chrome open a bit longer to ensure print job completes
+        // Wait 10 seconds before closing Chrome
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        
+        // Close Chrome process
+        try {
+          await execAsync(`powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Stop-Process -Id ${procId} -Force -ErrorAction SilentlyContinue; Write-Output 'Chrome closed' }"`);
+        } catch (cleanupError) {
+          // Ignore cleanup errors
         }
         
-        // Wait for print job to be processed
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        // Close the HTTP server
-        server.close();
+        // Close the HTTP server and wait for it to close before continuing
+        // This ensures the file exists for the entire print operation
+        await new Promise<void>((resolve) => {
+          server.close(() => {
+            console.log(`   HTTP server closed`);
+            resolve();
+          });
+        });
         
       } catch (error: any) {
         if (i === 0) {
@@ -1283,24 +1346,34 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
           // Validate pageColors structure
           if (!normalizedPageColors) {
             console.warn(`⚠️ Mixed color mode requested but pageColors is missing. Defaulting to B&W mode.`);
-            // Default to B&W mode using Windows print spooler (fastest)
+            // Default to B&W mode using Chrome (fastest)
             try {
-              await printPdfWithWindowsSpooler(pdfPath, printerName, true, copies);
+              await printPdfWithChrome(pdfPath, printerName, true, copies);
             } catch (error: any) {
-              console.warn(`⚠️ Windows spooler failed, using SumatraPDF: ${error.message}`);
-              await printPdfWithSumatra(pdfPath, printerName, true, copies);
+              console.warn(`⚠️ Chrome failed, using SumatraPDF: ${error.message}`);
+              try {
+                await printPdfWithSumatra(pdfPath, printerName, true, copies);
+              } catch (sumatraError: any) {
+                console.warn(`⚠️ SumatraPDF failed, using Windows spooler: ${sumatraError.message}`);
+                await printPdfWithWindowsSpooler(pdfPath, printerName, true, copies);
+              }
             }
           } else if (!Array.isArray(normalizedPageColors.colorPages) || !Array.isArray(normalizedPageColors.bwPages)) {
             console.warn(`⚠️ Mixed color mode requested but pageColors structure is invalid.`);
             console.warn(`   Expected: { colorPages: number[], bwPages: number[] }`);
             console.warn(`   Received:`, JSON.stringify(normalizedPageColors, null, 2));
             console.warn(`   Defaulting to B&W mode.`);
-            // Default to B&W mode using Windows print spooler (fastest)
+            // Default to B&W mode using Chrome (fastest)
             try {
-              await printPdfWithWindowsSpooler(pdfPath, printerName, true, copies);
+              await printPdfWithChrome(pdfPath, printerName, true, copies);
             } catch (error: any) {
-              console.warn(`⚠️ Windows spooler failed, using SumatraPDF: ${error.message}`);
-              await printPdfWithSumatra(pdfPath, printerName, true, copies);
+              console.warn(`⚠️ Chrome failed, using SumatraPDF: ${error.message}`);
+              try {
+                await printPdfWithSumatra(pdfPath, printerName, true, copies);
+              } catch (sumatraError: any) {
+                console.warn(`⚠️ SumatraPDF failed, using Windows spooler: ${sumatraError.message}`);
+                await printPdfWithWindowsSpooler(pdfPath, printerName, true, copies);
+              }
             }
           } else {
             // Valid pageColors structure - use mixed color printing
@@ -1321,12 +1394,31 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
             );
           }
         } else {
-          // Regular PDF printing (not mixed mode) using Windows print spooler (fastest)
+          // Regular PDF printing (not mixed mode) using Chrome (fastest, same as regular PDFs)
           try {
-            await printPdfWithWindowsSpooler(pdfPath, printerName, isMonochrome, copies);
+            await printPdfWithChrome(pdfPath, printerName, isMonochrome, copies);
+            console.log(`✅ Print job sent successfully using Chrome`);
           } catch (error: any) {
-            console.warn(`⚠️ Windows spooler failed, using SumatraPDF: ${error.message}`);
-            await printPdfWithSumatra(pdfPath, printerName, isMonochrome, copies);
+            console.warn(`⚠️ Chrome failed: ${error.message}`);
+            console.log(`🔄 Falling back to SumatraPDF...`);
+            
+            // Fallback to SumatraPDF
+            try {
+              await printPdfWithSumatra(pdfPath, printerName, isMonochrome, copies);
+              console.log(`✅ Print job sent successfully using SumatraPDF (fallback)`);
+            } catch (sumatraError: any) {
+              console.warn(`⚠️ SumatraPDF failed: ${sumatraError.message}`);
+              console.log(`🔄 Falling back to Windows print spooler...`);
+              
+              // Last resort: Windows print spooler
+              try {
+                await printPdfWithWindowsSpooler(pdfPath, printerName, isMonochrome, copies);
+                console.log(`✅ Print job sent successfully using Windows print spooler (last resort)`);
+              } catch (spoolerError: any) {
+                console.error(`❌ All print methods failed`);
+                throw new Error(`Print failed: Chrome: ${error.message}, SumatraPDF: ${sumatraError.message}, Windows spooler: ${spoolerError.message}`);
+              }
+            }
           }
         }
         
