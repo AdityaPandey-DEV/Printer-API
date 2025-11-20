@@ -992,9 +992,38 @@ async function printPdfWithChrome(
         console.log(`   Waiting ${totalWaitTime} seconds for PDF to load...`);
         await new Promise(resolve => setTimeout(resolve, totalWaitTime * 1000));
         
-        // Trigger printing
+        // Trigger printing with color mode setting
         try {
-          const printCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 2; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Write-Output 'Print command sent' } else { Write-Output 'Process not found or exited' }"`;
+          // Build the print command that interacts with Chrome's print dialog
+          // Chrome's print dialog has a Color dropdown that defaults to "Color"
+          // We need to change it to "Black and white" for B&W printing
+          let printCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 500; `;
+          
+          // Open print dialog (Ctrl+P)
+          printCmd += `[System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 2; `;
+          
+          if (isMonochrome) {
+            // For B&W printing: Navigate to Color dropdown and change to "Black and white"
+            // Chrome's print dialog structure: Destination -> Pages -> Layout -> Color -> More settings
+            // The Color dropdown is usually accessible via Tab navigation
+            console.log(`   Setting Chrome print dialog to Black and white mode...`);
+            // Navigate through dialog fields to reach Color dropdown
+            // Typically: Tab 4-6 times to reach Color dropdown (varies by Chrome version)
+            // Use multiple tabs to ensure we reach it
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}'); Start-Sleep -Milliseconds 400; `;
+            // Open Color dropdown (Alt+Down or Space)
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('%{DOWN}'); Start-Sleep -Milliseconds 400; `;
+            // Select "Black and white" option (Down arrow once, as "Color" is first, "Black and white" is second)
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{DOWN}'); Start-Sleep -Milliseconds 300; `;
+            // Confirm selection (Enter)
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Milliseconds 300; `;
+          } else {
+            // For Color printing: Keep default "Color" setting (no changes needed)
+            console.log(`   Keeping Chrome print dialog in Color mode (default)...`);
+          }
+          
+          // Press Enter to print
+          printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Write-Output 'Print command sent with color mode set' } else { Write-Output 'Process not found or exited' }"`;
           
           const printResult = await execAsync(printCmd);
           console.log(`   Print command result: ${printResult.stdout.trim()}`);
