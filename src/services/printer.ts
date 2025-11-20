@@ -501,9 +501,15 @@ async function printPdfWithMixedColorInSequence(
       console.log(`🖨️ Printing Group ${originalGroupNum} (reverse order ${groupIndex + 1}/${pageGroups.length}): Pages ${group.startIndex + 1}-${group.endIndex + 1} (${group.isMonochrome ? 'B&W' : 'Color'})...`);
       
       // For B&W groups, force printer driver to grayscale mode for fast printing
-      if (group.isMonochrome && process.platform === 'win32') {
-        await forceGrayscaleMode(printerName);
-        await new Promise(resolve => setTimeout(resolve, 500));
+      // For Color groups, force printer driver to color mode
+      if (process.platform === 'win32') {
+        if (group.isMonochrome) {
+          await forceGrayscaleMode(printerName);
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } else {
+          await forceColorMode(printerName);
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
       
       // Print with Chrome (primary), SumatraPDF (fallback), or Windows print spooler (last resort)
@@ -610,6 +616,60 @@ async function forceGrayscaleMode(printerName: string): Promise<boolean> {
     return false;
   } catch (error: any) {
     console.warn(`⚠️ Error forcing grayscale mode: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Force printer to color mode using Windows PowerShell
+ * This ensures the printer driver processes jobs as color, not grayscale
+ */
+async function forceColorMode(printerName: string): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    return true;
+  }
+
+  try {
+    console.log(`🎨 Attempting to force color mode for printer: ${printerName}`);
+    
+    // Method 1: Use Set-PrintConfiguration to set ColorMode to Color
+    const setColorCmd = `powershell -Command "$printer = Get-Printer -Name '${printerName}' -ErrorAction SilentlyContinue; if ($printer) { Set-PrintConfiguration -PrinterName '${printerName}' -ColorMode Color -ErrorAction SilentlyContinue; if ($?) { Write-Output 'SUCCESS' } else { Write-Output 'FAILED' } } else { Write-Output 'PRINTER_NOT_FOUND' }"`;
+    
+    try {
+      const { stdout } = await execAsync(setColorCmd);
+      const result = stdout.trim();
+      
+      if (result === 'SUCCESS') {
+        console.log(`✅ Successfully set printer to color mode via Set-PrintConfiguration`);
+        return true;
+      } else if (result === 'PRINTER_NOT_FOUND') {
+        console.warn(`⚠️ Printer not found for color configuration: ${printerName}`);
+      } else {
+        console.warn(`⚠️ Set-PrintConfiguration returned: ${result}`);
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ Set-PrintConfiguration failed: ${error.message}`);
+    }
+    
+    // Method 2: Use printer properties via COM object (more reliable for some drivers)
+    const comColorCmd = `powershell -Command "$printer = Get-Printer -Name '${printerName}' -ErrorAction SilentlyContinue; if ($printer) { $printerConfig = Get-PrintConfiguration -PrinterName '${printerName}' -ErrorAction SilentlyContinue; if ($printerConfig) { $printerConfig.ColorMode = 'Color'; Set-PrintConfiguration -InputObject $printerConfig -ErrorAction SilentlyContinue; if ($?) { Write-Output 'SUCCESS' } else { Write-Output 'FAILED' } } else { Write-Output 'NO_CONFIG' } } else { Write-Output 'PRINTER_NOT_FOUND' }"`;
+    
+    try {
+      const { stdout } = await execAsync(comColorCmd);
+      const result = stdout.trim();
+      
+      if (result === 'SUCCESS') {
+        console.log(`✅ Successfully set printer to color mode via COM object`);
+        return true;
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ COM object color configuration failed: ${error.message}`);
+    }
+    
+    console.warn(`⚠️ Could not force color mode via automated methods, will rely on print job settings`);
+    return false;
+  } catch (error: any) {
+    console.warn(`⚠️ Error forcing color mode: ${error.message}`);
     return false;
   }
 }
@@ -794,10 +854,14 @@ async function printPdfWithChrome(
   try {
     console.log(`⚡ Using ${browserName} with --kiosk-printing for fastest printing (monochrome=${isMonochrome})`);
     
-    // Force printer driver to grayscale mode BEFORE printing
+    // Force printer driver to appropriate mode BEFORE printing
     if (isMonochrome) {
       console.log(`🎨 Forcing printer driver to grayscale mode before printing...`);
       await forceGrayscaleMode(printerName);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } else {
+      console.log(`🎨 Forcing printer driver to color mode before printing...`);
+      await forceColorMode(printerName);
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     
@@ -1004,11 +1068,16 @@ async function printPdfWithWindowsSpooler(
   try {
     console.log(`⚡ Using Windows print spooler API for fastest printing (monochrome=${isMonochrome})`);
     
-    // CRITICAL: Force printer driver to grayscale mode BEFORE printing
-    // This ensures the printer processes the job as grayscale, not color
+    // CRITICAL: Force printer driver to appropriate mode BEFORE printing
+    // This ensures the printer processes the job in the correct mode
     if (isMonochrome) {
       console.log(`🎨 Forcing printer driver to grayscale mode before printing...`);
       await forceGrayscaleMode(printerName);
+      // Small delay to ensure settings are applied
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } else {
+      console.log(`🎨 Forcing printer driver to color mode before printing...`);
+      await forceColorMode(printerName);
       // Small delay to ensure settings are applied
       await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -1021,9 +1090,11 @@ async function printPdfWithWindowsSpooler(
     // but with explicit printer driver settings
     let printCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; `;
     
-    // Set printer to grayscale if needed (redundant but ensures it's set)
+    // Set printer to appropriate mode (redundant but ensures it's set)
     if (isMonochrome) {
       printCmd += `try { Set-PrintConfiguration -PrinterName '${escapedPrinterName}' -ColorMode Grayscale -ErrorAction SilentlyContinue | Out-Null } catch {}; `;
+    } else {
+      printCmd += `try { Set-PrintConfiguration -PrinterName '${escapedPrinterName}' -ColorMode Color -ErrorAction SilentlyContinue | Out-Null } catch {}; `;
     }
     
     // Use Start-Process with Print verb - this uses Windows default PDF handler
@@ -1034,7 +1105,7 @@ async function printPdfWithWindowsSpooler(
     printCmd += `if (-not $proc.HasExited) { Write-Host 'Print job queued' } else { Write-Host 'Print process completed' }"`;
     
     console.log(`Executing Windows print spooler command (monochrome=${isMonochrome}, copies=${copies})`);
-    console.log(`   Printer driver is in grayscale mode for fast B&W printing`);
+    console.log(`   Printer driver is in ${isMonochrome ? 'grayscale mode for fast B&W printing' : 'color mode'}`);
     
     // Print all copies
     for (let i = 0; i < copies; i++) {
@@ -1101,10 +1172,14 @@ async function printPdfWithSumatra(
   try {
     console.log(`⚡ Using SumatraPDF for optimal printing performance (monochrome=${isMonochrome})`);
     
-    // Force printer driver to grayscale mode BEFORE printing
+    // Force printer driver to appropriate mode BEFORE printing
     if (isMonochrome) {
       console.log(`🎨 Forcing printer driver to grayscale mode before printing...`);
       await forceGrayscaleMode(printerName);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } else {
+      console.log(`🎨 Forcing printer driver to color mode before printing...`);
+      await forceColorMode(printerName);
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     
