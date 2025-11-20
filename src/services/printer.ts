@@ -902,9 +902,10 @@ async function printPdfWithChrome(
         // Create a simple HTTP server to serve the PDF
         const server = http.createServer((req, res) => {
           const parsedUrl = url.parse(req.url || '/');
-          const requestedFile = parsedUrl.pathname?.substring(1) || '';
+          const requestedFile = decodeURIComponent(parsedUrl.pathname?.substring(1) || '');
           
-          if (requestedFile === encodeURIComponent(fileName) || requestedFile === fileName) {
+          // Check if the requested file matches (handle both encoded and decoded URLs)
+          if (requestedFile === fileName || requestedFile === encodeURIComponent(fileName) || decodeURIComponent(requestedFile) === fileName) {
             // Check if file exists before trying to serve it
             if (!fs.existsSync(filePath)) {
               console.error(`❌ File not found: ${filePath}`);
@@ -926,7 +927,9 @@ async function printPdfWithChrome(
               
               res.writeHead(200, {
                 'Content-Type': 'application/pdf',
-                'Content-Disposition': `inline; filename="${fileName}"`
+                'Content-Disposition': `inline; filename="${fileName}"`,
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'no-cache'
               });
               fileStream.pipe(res);
             } catch (error: any) {
@@ -960,10 +963,6 @@ async function printPdfWithChrome(
           });
         });
         
-        // Open Chrome with --kiosk-printing and the PDF directly via HTTP
-        // Chrome will open it in PDF viewer, then we trigger printing
-        const escapedPdfUrl = httpUrl.replace(/"/g, '\\"');
-        
         // Check if file exists before proceeding
         if (!fs.existsSync(filePath)) {
           throw new Error(`File not found: ${filePath}`);
@@ -980,9 +979,14 @@ async function printPdfWithChrome(
         console.log(`   Using local HTTP server to serve PDF (avoids local file restrictions)`);
         console.log(`   Opening PDF directly in ${browserName} PDF viewer, then triggering print`);
         console.log(`   File size: ${fileSizeMB.toFixed(2)} MB - will wait ${totalWaitTime} seconds for PDF to load`);
+        console.log(`   PDF URL: ${httpUrl}`);
         
         // Launch Chrome and keep it running
-        const chromeCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; $proc = Start-Process -FilePath '${escapedBrowserPath}' -ArgumentList '--kiosk-printing', '--disable-gpu', '${escapedPdfUrl}' -PassThru -ErrorAction Stop; $procId = $proc.Id; Write-Output $procId"`;
+        // Ensure Chrome recognizes the URL as a PDF - use proper argument formatting
+        // Chrome needs the URL to be passed as a single argument, properly quoted
+        // Use single quotes around the URL in PowerShell to prevent it from being treated as a search query
+        const escapedPdfUrlForChrome = httpUrl.replace(/'/g, "''");
+        const chromeCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; $url = '${escapedPdfUrlForChrome}'; $proc = Start-Process -FilePath '${escapedBrowserPath}' -ArgumentList '--kiosk-printing', '--disable-gpu', $url -PassThru -ErrorAction Stop; $procId = $proc.Id; Write-Output $procId"`;
         
         const { stdout } = await execAsync(chromeCmd);
         const procId = stdout.trim();
