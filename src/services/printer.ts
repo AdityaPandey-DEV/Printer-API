@@ -1215,23 +1215,27 @@ async function printPdfWithChrome(
             // Open print dialog (Ctrl+P)
             printCmd += `[System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 3; `;
             
+            // Tab 8 times to reach Color dropdown (from Pages dropdown)
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}'); Start-Sleep -Milliseconds 500; `;
+            // Open Color dropdown (Alt+Down or Space)
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('%{DOWN}'); Start-Sleep -Milliseconds 500; `;
+            
             if (isMonochrome) {
-              // For B&W printing: Default is already "Black and white", no changes needed
-              console.log(`   Chrome print dialog default is Black and white - no changes needed`);
+              // For B&W printing: Navigate to Color dropdown and explicitly select "Black and white"
+              console.log(`   Setting Chrome print dialog to Black and white mode...`);
+              // Select "Black and white" option (Up arrow to ensure we're on "Black and white")
+              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{UP}'); Start-Sleep -Milliseconds 400; `;
             } else {
               // For Color printing: Navigate to Color dropdown and select "Color"
               console.log(`   Setting Chrome print dialog to Color mode...`);
-              // Tab 8 times to reach Color dropdown (from Pages dropdown)
-              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}'); Start-Sleep -Milliseconds 500; `;
-              // Open Color dropdown (Alt+Down or Space)
-              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('%{DOWN}'); Start-Sleep -Milliseconds 500; `;
               // Select "Color" option (Down arrow once, as "Black and white" is default, "Color" is one down)
               printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{DOWN}'); Start-Sleep -Milliseconds 400; `;
-              // Confirm selection (Enter)
-              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Milliseconds 400; `;
-              // Tab 2 times to reach Print button after color selection
-              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}'); Start-Sleep -Milliseconds 400; `;
             }
+            
+            // Confirm selection (Enter)
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Milliseconds 400; `;
+            // Tab 2 times to reach Print button after color selection
+            printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}'); Start-Sleep -Milliseconds 400; `;
             
             // Press Enter to print
             printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Write-Output 'Print command sent with color mode set' } else { Write-Output 'Process not found or exited' }"`;
