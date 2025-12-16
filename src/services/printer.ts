@@ -999,47 +999,135 @@ async function printPdfWithChrome(
         console.log(`   File size: ${fileSizeMB.toFixed(2)} MB - will wait ${totalWaitTime} seconds for PDF to load`);
         console.log(`   PDF URL: ${httpUrl}`);
         
+        // Verify HTTP server is ready before launching Chrome
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const testReq = http.get(`http://localhost:${serverPort}/`, (res) => {
+              res.on('data', () => {});
+              res.on('end', () => {
+                console.log(`   HTTP server verification: Ready (status ${res.statusCode})`);
+                resolve();
+              });
+            });
+            testReq.on('error', (err) => {
+              console.log(`   HTTP server test failed (will continue anyway): ${err.message}`);
+              resolve(); // Continue anyway
+            });
+            testReq.setTimeout(2000, () => {
+              testReq.destroy();
+              console.log(`   HTTP server test timeout (will continue anyway)`);
+              resolve(); // Continue anyway
+            });
+          });
+        } catch (testError) {
+          console.log(`   HTTP server test skipped, proceeding with Chrome launch`);
+        }
+        
         // Launch Chrome and keep it running
         // Ensure Chrome recognizes the URL as a PDF - use proper argument formatting
         // Chrome needs the URL to be passed as a single argument, properly quoted
         // Use single quotes around the URL in PowerShell to prevent it from being treated as a search query
         // NOTE: We don't use --kiosk-printing because we need to control color mode via print dialog
+        // Added flags to keep Chrome open: --no-first-run, --no-default-browser-check, --disable-extensions
         const escapedPdfUrlForChrome = httpUrl.replace(/'/g, "''");
-        const chromeCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; $url = '${escapedPdfUrlForChrome}'; $proc = Start-Process -FilePath '${escapedBrowserPath}' -ArgumentList '--disable-gpu', '--new-window', $url -PassThru -ErrorAction Stop; $procId = $proc.Id; Write-Output $procId"`;
+        const chromeCmd = `powershell -Command "$ErrorActionPreference = 'Stop'; $url = '${escapedPdfUrlForChrome}'; $proc = Start-Process -FilePath '${escapedBrowserPath}' -ArgumentList '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--new-window', $url -PassThru -ErrorAction Stop; $procId = $proc.Id; Write-Output $procId"`;
         
-        const { stdout } = await execAsync(chromeCmd);
-        const procId = stdout.trim();
-        console.log(`   Chrome process started with PID: ${procId}`);
+        console.log(`   Launching Chrome with URL: ${httpUrl}`);
+        console.log(`   Chrome command: ${chromeCmd.substring(0, 200)}...`); // Log first 200 chars of command
+        const { stdout, stderr } = await execAsync(chromeCmd);
+        const initialProcId = stdout.trim();
+        if (stderr) {
+          console.log(`   Chrome launch stderr: ${stderr.trim()}`);
+        }
+        console.log(`   Chrome launcher process started with PID: ${initialProcId}`);
         
-        // Wait a bit for Chrome to fully start before checking
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait longer for Chrome to fully start (launcher exits, actual Chrome process starts)
+        console.log(`   Waiting 3 seconds for Chrome to fully initialize...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
         
-        // Verify Chrome is still running (with retry)
+        // Find the actual Chrome window process (not the launcher)
+        // The launcher process exits quickly, we need to find the actual Chrome browser process
+        let procId: string | null = null;
         let chromeStillRunning = false;
-        for (let retry = 0; retry < 3; retry++) {
+        
+        // First, try to find Chrome process by the initial PID (in case it's still valid)
+        try {
+          const checkInitialCmd = `powershell -Command "$proc = Get-Process -Id ${initialProcId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Write-Output 'RUNNING' } else { Write-Output 'NOT_RUNNING' }"`;
+          const { stdout: initialCheck } = await execAsync(checkInitialCmd);
+          if (initialCheck.trim() === 'RUNNING') {
+            procId = initialProcId;
+            chromeStillRunning = true;
+            console.log(`   Initial Chrome process ${initialProcId} is still running`);
+          }
+        } catch (initialError) {
+          console.log(`   Initial process ${initialProcId} not found, searching for Chrome window process...`);
+        }
+        
+        // If initial PID doesn't work, find Chrome process by name with a window
+        if (!chromeStillRunning) {
           try {
-            const checkProcCmd = `powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Write-Output 'RUNNING' } else { Write-Output 'NOT_RUNNING' }"`;
-            const { stdout: procCheck } = await execAsync(checkProcCmd);
-            chromeStillRunning = procCheck.trim() === 'RUNNING';
-            if (chromeStillRunning) {
-              break;
+            const browserProcessName = browserName === 'Chrome' ? 'chrome' : 'msedge';
+            console.log(`   Searching for ${browserName} processes with windows...`);
+            const findChromeCmd = `powershell -Command "$procs = Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' -and $_.StartTime -gt (Get-Date).AddSeconds(-10) } | Sort-Object StartTime -Descending | Select-Object -First 1; if ($procs) { Write-Output $procs.Id } else { Write-Output 'NOT_FOUND' }"`;
+            const { stdout: chromeProcId, stderr: findStderr } = await execAsync(findChromeCmd);
+            const foundProcId = chromeProcId.trim();
+            
+            if (findStderr) {
+              console.log(`   Process search stderr: ${findStderr.trim()}`);
             }
-            if (retry < 2) {
-              console.log(`   Chrome process check failed, retrying... (${retry + 1}/3)`);
-              await new Promise(resolve => setTimeout(resolve, 500));
+            
+            if (foundProcId && foundProcId !== 'NOT_FOUND' && !isNaN(parseInt(foundProcId))) {
+              procId = foundProcId;
+              chromeStillRunning = true;
+              console.log(`   Found Chrome window process with PID: ${procId}`);
+            } else {
+              // List all Chrome processes for debugging
+              try {
+                const listProcsCmd = `powershell -Command "Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, MainWindowTitle, StartTime | Format-List"`;
+                const { stdout: allProcs } = await execAsync(listProcsCmd);
+                console.log(`   All ${browserName} processes found:\n${allProcs}`);
+              } catch (listError) {
+                console.warn(`   Could not list processes: ${listError}`);
+              }
+              console.warn(`   Could not find Chrome window process`);
             }
-          } catch (checkError) {
-            console.warn(`   ⚠️ Could not check Chrome process status: ${checkError}`);
-            if (retry < 2) {
-              await new Promise(resolve => setTimeout(resolve, 500));
+          } catch (findError) {
+            console.warn(`   Error finding Chrome process: ${findError}`);
+          }
+        }
+        
+        // Final verification with retry
+        if (procId && chromeStillRunning) {
+          for (let retry = 0; retry < 3; retry++) {
+            try {
+              const checkProcCmd = `powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Write-Output 'RUNNING' } else { Write-Output 'NOT_RUNNING' }"`;
+              const { stdout: procCheck } = await execAsync(checkProcCmd);
+              chromeStillRunning = procCheck.trim() === 'RUNNING';
+              if (chromeStillRunning) {
+                console.log(`   Verified Chrome process ${procId} is running`);
+                break;
+              }
+              if (retry < 2) {
+                console.log(`   Chrome process check failed, retrying... (${retry + 1}/3)`);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            } catch (checkError) {
+              console.warn(`   ⚠️ Could not check Chrome process status: ${checkError}`);
+              if (retry < 2) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
             }
           }
         }
         
-        if (!chromeStillRunning) {
-          console.warn(`   ⚠️ Chrome process ${procId} is not running after launch, cannot send print command`);
-          throw new Error('Chrome process exited immediately after launch');
+        if (!chromeStillRunning || !procId) {
+          console.warn(`   ⚠️ Chrome process is not running after launch, cannot send print command`);
+          console.warn(`   Initial PID: ${initialProcId}, Found PID: ${procId || 'N/A'}`);
+          throw new Error('Chrome process exited immediately after launch or could not be found');
         }
+        
+        // At this point, procId is guaranteed to be non-null
+        const finalProcId = procId;
         
         // Wait for PDF to fully load (longer for larger files)
         console.log(`   Waiting ${totalWaitTime} seconds for PDF to load...`);
@@ -1047,11 +1135,11 @@ async function printPdfWithChrome(
         
         // Verify Chrome is still running before attempting to interact
         try {
-          const checkProcCmd = `powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Write-Output 'RUNNING' } else { Write-Output 'NOT_RUNNING' }"`;
+          const checkProcCmd = `powershell -Command "$proc = Get-Process -Id ${finalProcId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Write-Output 'RUNNING' } else { Write-Output 'NOT_RUNNING' }"`;
           const { stdout: procCheck } = await execAsync(checkProcCmd);
           chromeStillRunning = procCheck.trim() === 'RUNNING';
           if (!chromeStillRunning) {
-            console.warn(`   ⚠️ Chrome process ${procId} exited while waiting for PDF to load`);
+            console.warn(`   ⚠️ Chrome process ${finalProcId} exited while waiting for PDF to load`);
             throw new Error('Chrome process exited while waiting for PDF to load');
           }
         } catch (checkError) {
@@ -1068,7 +1156,7 @@ async function printPdfWithChrome(
             // - Color dropdown is at 9 tabs from the start
             // - Color dropdown default is "Black and white"
             // - One Down from "Black and white" = "Color"
-            let printCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 1000; `;
+            let printCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${finalProcId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($finalProcId); Start-Sleep -Milliseconds 1000; `;
             
             // Open print dialog (Ctrl+P)
             printCmd += `[System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 3; `;
@@ -1098,7 +1186,7 @@ async function printPdfWithChrome(
             console.warn(`   ⚠️ Failed to send print command: ${printError.message}`);
             // Try fallback: just print without color mode change
             try {
-              const fallbackCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 2; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Write-Output 'Fallback print sent' }"`;
+              const fallbackCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${finalProcId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate(${finalProcId}); Start-Sleep -Milliseconds 500; [System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 2; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Write-Output 'Fallback print sent' }"`;
               await execAsync(fallbackCmd);
               console.log(`   Fallback print command sent`);
             } catch (fallbackError) {
@@ -1121,7 +1209,7 @@ async function printPdfWithChrome(
         
         // Close Chrome process
         try {
-          await execAsync(`powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Stop-Process -Id ${procId} -Force -ErrorAction SilentlyContinue; Write-Output 'Chrome closed' }"`);
+          await execAsync(`powershell -Command "$proc = Get-Process -Id ${finalProcId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Stop-Process -Id ${finalProcId} -Force -ErrorAction SilentlyContinue; Write-Output 'Chrome closed' }"`);
         } catch (cleanupError) {
           // Ignore cleanup errors
         }
