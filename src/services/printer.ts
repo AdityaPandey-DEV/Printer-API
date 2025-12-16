@@ -1229,6 +1229,8 @@ async function printPdfWithChrome(
               printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{DOWN}'); Start-Sleep -Milliseconds 400; `;
               // Confirm selection (Enter)
               printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Milliseconds 400; `;
+              // Tab 2 times to reach Print button after color selection
+              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}'); Start-Sleep -Milliseconds 400; `;
             }
             
             // Press Enter to print
