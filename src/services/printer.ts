@@ -1067,25 +1067,79 @@ async function printPdfWithChrome(
         if (!chromeStillRunning) {
           try {
             const browserProcessName = browserName === 'Chrome' ? 'chrome' : 'msedge';
+            
+            // Extract PDF filename from file path for window title matching
+            const pdfFileName = path.basename(filePath);
+            const pdfFileNameBase = path.basename(filePath, path.extname(filePath)); // Without extension
+            
             console.log(`   Searching for ${browserName} processes with windows...`);
-            const findChromeCmd = `powershell -Command "$procs = Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' -and $_.StartTime -gt (Get-Date).AddSeconds(-10) } | Sort-Object StartTime -Descending | Select-Object -First 1; if ($procs) { Write-Output $procs.Id } else { Write-Output 'NOT_FOUND' }"`;
-            const { stdout: chromeProcId, stderr: findStderr } = await execAsync(findChromeCmd);
-            const foundProcId = chromeProcId.trim();
+            console.log(`   Looking for window title containing: ${pdfFileName}`);
+            
+            // Strategy 1: Search by window title containing PDF filename (most reliable)
+            let findChromeCmd = `powershell -Command "$procs = Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' -and ($_.MainWindowTitle -like '*${pdfFileNameBase}*' -or $_.MainWindowTitle -like '*${pdfFileName}*') } | Sort-Object StartTime -Descending | Select-Object -First 1; if ($procs) { Write-Output $procs.Id } else { Write-Output 'NOT_FOUND' }"`;
+            
+            let { stdout: chromeProcId, stderr: findStderr } = await execAsync(findChromeCmd);
+            let foundProcId = chromeProcId.trim();
             
             if (findStderr) {
               console.log(`   Process search stderr: ${findStderr.trim()}`);
+            }
+            
+            // Strategy 2: If window title search fails, search for most recent Chrome process with any window (within last 60 seconds)
+            if (!foundProcId || foundProcId === 'NOT_FOUND' || isNaN(parseInt(foundProcId))) {
+              console.log(`   Window title search failed, trying recent processes (last 60 seconds)...`);
+              findChromeCmd = `powershell -Command "$procs = Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' -and $_.StartTime -gt (Get-Date).AddSeconds(-60) } | Sort-Object StartTime -Descending | Select-Object -First 1; if ($procs) { Write-Output $procs.Id } else { Write-Output 'NOT_FOUND' }"`;
+              
+              try {
+                const result = await execAsync(findChromeCmd);
+                foundProcId = result.stdout.trim();
+                if (result.stderr) {
+                  console.log(`   Recent process search stderr: ${result.stderr.trim()}`);
+                }
+              } catch (recentError) {
+                console.warn(`   Recent process search failed: ${recentError}`);
+              }
+            }
+            
+            // Strategy 3: If still not found, find any Chrome process with a window (no time restriction)
+            if (!foundProcId || foundProcId === 'NOT_FOUND' || isNaN(parseInt(foundProcId))) {
+              console.log(`   Recent process search failed, trying any process with window...`);
+              findChromeCmd = `powershell -Command "$procs = Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' } | Sort-Object StartTime -Descending | Select-Object -First 1; if ($procs) { Write-Output $procs.Id } else { Write-Output 'NOT_FOUND' }"`;
+              
+              try {
+                const result = await execAsync(findChromeCmd);
+                foundProcId = result.stdout.trim();
+                if (result.stderr) {
+                  console.log(`   Any process search stderr: ${result.stderr.trim()}`);
+                }
+              } catch (anyError) {
+                console.warn(`   Any process search failed: ${anyError}`);
+              }
             }
             
             if (foundProcId && foundProcId !== 'NOT_FOUND' && !isNaN(parseInt(foundProcId))) {
               procId = foundProcId;
               chromeStillRunning = true;
               console.log(`   Found Chrome window process with PID: ${procId}`);
+              
+              // Verify the window title for debugging
+              try {
+                const verifyCmd = `powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc) { Write-Output $proc.MainWindowTitle } else { Write-Output 'NOT_FOUND' }"`;
+                const { stdout: windowTitle } = await execAsync(verifyCmd);
+                console.log(`   Chrome window title: ${windowTitle.trim()}`);
+              } catch (verifyError) {
+                // Ignore verification errors
+              }
             } else {
               // List all Chrome processes for debugging
               try {
-                const listProcsCmd = `powershell -Command "Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, MainWindowTitle, StartTime | Format-List"`;
+                const listProcsCmd = `powershell -Command "Get-Process -Name '${browserProcessName}' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' } | Select-Object Id, ProcessName, MainWindowTitle, StartTime | Format-List"`;
                 const { stdout: allProcs } = await execAsync(listProcsCmd);
-                console.log(`   All ${browserName} processes found:\n${allProcs}`);
+                if (allProcs && allProcs.trim()) {
+                  console.log(`   All ${browserName} processes with windows found:\n${allProcs}`);
+                } else {
+                  console.log(`   No ${browserName} processes with windows found`);
+                }
               } catch (listError) {
                 console.warn(`   Could not list processes: ${listError}`);
               }
