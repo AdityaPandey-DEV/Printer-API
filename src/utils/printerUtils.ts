@@ -264,8 +264,8 @@ export async function generateOrderSummaryPage(
     });
   }
   
-  // Add Total Amount
-  orderSummaryLines.push(`Total Amount: ₹${orderDetails.totalAmount}`);
+  // Add Total Amount (use "Rs" instead of ₹ symbol to avoid encoding issues with standard fonts)
+  orderSummaryLines.push(`Total Amount: Rs ${orderDetails.totalAmount}`);
   
   // Add Expected Delivery
   if (orderDetails.expectedDelivery) {
