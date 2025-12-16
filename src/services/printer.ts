@@ -1975,7 +1975,20 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    // Print order summary page FIRST (will appear on top due to stack-based printing)
+    // Download file
+    const fileExtension = path.extname(job.fileName) || '.pdf';
+    const tempFilePath = path.join(tempDir, `${job.deliveryNumber}${fileExtension}`);
+    
+    console.log(`Downloading file from ${job.fileUrl}...`);
+    await downloadFile(job.fileUrl, tempFilePath);
+    console.log(`File downloaded to ${tempFilePath}`);
+
+    // Print the file FIRST (will be at bottom of stack)
+    console.log(`Printing file: ${tempFilePath}`);
+    await printFile(tempFilePath, job.printingOptions);
+    console.log(`File printed successfully`);
+
+    // Print order summary page LAST (will appear on top due to stack-based printing - LIFO)
     if (job.orderDetails && job.customerInfo) {
       console.log(`Printing order summary page...`);
       const orderSummaryPage = await generateOrderSummaryPage(job.orderDetails, job.customerInfo);
@@ -1986,20 +1999,9 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
       console.log(`Order summary page printed successfully`);
     } else {
       console.log(`⏭️ Skipping order summary page (orderDetails or customerInfo not provided)`);
+      console.log(`   orderDetails: ${job.orderDetails ? 'provided' : 'missing'}`);
+      console.log(`   customerInfo: ${job.customerInfo ? 'provided' : 'missing'}`);
     }
-
-    // Download file
-    const fileExtension = path.extname(job.fileName) || '.pdf';
-    const tempFilePath = path.join(tempDir, `${job.deliveryNumber}${fileExtension}`);
-    
-    console.log(`Downloading file from ${job.fileUrl}...`);
-    await downloadFile(job.fileUrl, tempFilePath);
-    console.log(`File downloaded to ${tempFilePath}`);
-
-    // Print the file
-    console.log(`Printing file: ${tempFilePath}`);
-    await printFile(tempFilePath, job.printingOptions);
-    console.log(`File printed successfully`);
 
     // Cleanup
     if (fs.existsSync(tempFilePath)) {
