@@ -1031,8 +1031,7 @@ async function printPdfWithChrome(
             // Build the print command that interacts with Chrome's print dialog
             // Chrome's print dialog structure after Ctrl+P:
             // - Focus starts on "Pages" dropdown
-            // - 1 Tab = Copies text bar
-            // - 2 Tabs = Color dropdown
+            // - Color dropdown is at 9 tabs from the start
             // - Color dropdown default is "Black and white"
             // - One Down from "Black and white" = "Color"
             let printCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 1000; `;
@@ -1046,8 +1045,8 @@ async function printPdfWithChrome(
             } else {
               // For Color printing: Navigate to Color dropdown and select "Color"
               console.log(`   Setting Chrome print dialog to Color mode...`);
-              // Tab 2 times to reach Color dropdown (Pages -> Copies -> Color)
-              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}'); Start-Sleep -Milliseconds 500; `;
+              // Tab 9 times to reach Color dropdown (from Pages dropdown)
+              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}'); Start-Sleep -Milliseconds 500; `;
               // Open Color dropdown (Alt+Down or Space)
               printCmd += `[System.Windows.Forms.SendKeys]::SendWait('%{DOWN}'); Start-Sleep -Milliseconds 500; `;
               // Select "Color" option (Down arrow once, as "Black and white" is default, "Color" is one down)
