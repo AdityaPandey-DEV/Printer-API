@@ -1029,31 +1029,31 @@ async function printPdfWithChrome(
         if (chromeStillRunning) {
           try {
             // Build the print command that interacts with Chrome's print dialog
-            // Chrome's print dialog has a Color dropdown that defaults to "Color"
-            // We need to change it to "Black and white" for B&W printing
+            // Chrome's print dialog structure after Ctrl+P:
+            // - Focus starts on "Pages" dropdown
+            // - 1 Tab = Copies text bar
+            // - 2 Tabs = Color dropdown
+            // - Color dropdown default is "Black and white"
+            // - One Down from "Black and white" = "Color"
             let printCmd = `powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; Add-Type -AssemblyName System.Windows.Forms; $proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { [Microsoft.VisualBasic.Interaction]::AppActivate($procId); Start-Sleep -Milliseconds 1000; `;
             
             // Open print dialog (Ctrl+P)
             printCmd += `[System.Windows.Forms.SendKeys]::SendWait('^p'); Start-Sleep -Seconds 3; `;
             
             if (isMonochrome) {
-              // For B&W printing: Navigate to Color dropdown and change to "Black and white"
-              // Chrome's print dialog structure: Destination -> Pages -> Layout -> Color -> More settings
-              // The Color dropdown is usually accessible via Tab navigation
-              console.log(`   Setting Chrome print dialog to Black and white mode...`);
-              // Navigate through dialog fields to reach Color dropdown
-              // Typically: Tab 4-6 times to reach Color dropdown (varies by Chrome version)
-              // Use multiple tabs to ensure we reach it
-              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}{TAB}{TAB}{TAB}{TAB}'); Start-Sleep -Milliseconds 500; `;
+              // For B&W printing: Default is already "Black and white", no changes needed
+              console.log(`   Chrome print dialog default is Black and white - no changes needed`);
+            } else {
+              // For Color printing: Navigate to Color dropdown and select "Color"
+              console.log(`   Setting Chrome print dialog to Color mode...`);
+              // Tab 2 times to reach Color dropdown (Pages -> Copies -> Color)
+              printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}'); Start-Sleep -Milliseconds 500; `;
               // Open Color dropdown (Alt+Down or Space)
               printCmd += `[System.Windows.Forms.SendKeys]::SendWait('%{DOWN}'); Start-Sleep -Milliseconds 500; `;
-              // Select "Black and white" option (Down arrow once, as "Color" is first, "Black and white" is second)
+              // Select "Color" option (Down arrow once, as "Black and white" is default, "Color" is one down)
               printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{DOWN}'); Start-Sleep -Milliseconds 400; `;
               // Confirm selection (Enter)
               printCmd += `[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Milliseconds 400; `;
-            } else {
-              // For Color printing: Keep default "Color" setting (no changes needed)
-              console.log(`   Keeping Chrome print dialog in Color mode (default)...`);
             }
             
             // Press Enter to print
