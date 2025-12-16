@@ -25,6 +25,20 @@ export interface PrintJobData {
     email: string;
     phone: string;
   };
+  orderDetails?: {
+    orderType: 'file' | 'template';
+    pageSize: 'A4' | 'A3';
+    color: 'color' | 'bw' | 'mixed';
+    sided: 'single' | 'double';
+    copies: number;
+    pages: number;
+    serviceOptions: Array<{
+      fileName: string;
+      options: string[];
+    }>;
+    totalAmount: number;
+    expectedDelivery: string;
+  };
 }
 
 export interface PrintJobResponse {

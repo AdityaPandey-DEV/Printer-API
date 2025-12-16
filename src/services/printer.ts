@@ -5,15 +5,10 @@ import * as url from 'url';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { PDFDocument } from 'pdf-lib';
-import { generateFileNumberPage, generateLetterSeparator } from '../utils/printerUtils';
-import { shouldPrintLetterSeparator, getCurrentLetter, getCurrentFileNumber } from './deliveryNumber';
 import { v4 as uuidv4 } from 'uuid';
+import { generateOrderSummaryPage } from '../utils/printerUtils';
 
 const execAsync = promisify(exec);
-
-// Track which delivery numbers have already had their file number separator printed
-// This prevents duplicate separator printing on job retries
-const printedFileNumberSeparators = new Set<string>();
 
 // Cache for detected printer name
 let detectedPrinterName: string | null = null;
@@ -217,6 +212,26 @@ export interface PrintJob {
     };
   };
   deliveryNumber: string;
+  orderId?: string;
+  customerInfo?: {
+    name: string;
+    email: string;
+    phone: string;
+  };
+  orderDetails?: {
+    orderType: 'file' | 'template';
+    pageSize: 'A4' | 'A3';
+    color: 'color' | 'bw' | 'mixed';
+    sided: 'single' | 'double';
+    copies: number;
+    pages: number;
+    serviceOptions: Array<{
+      fileName: string;
+      options: string[];
+    }>;
+    totalAmount: number;
+    expectedDelivery: string;
+  };
 }
 
 export interface PrintResult {
@@ -1733,54 +1748,18 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
       fs.mkdirSync(tempDir, { recursive: true });
     }
 
-    // Extract file number from delivery number (last digit)
-    // Delivery number format: {LETTER}{YYYYMMDD}{PRINTER_INDEX}{FILE_NUMBER}
-    // Example: A2025111011 = file number 1, A2025111012 = file number 2
-    let fileNumber = 1;
-    if (job.deliveryNumber && job.deliveryNumber.length > 0) {
-      const lastChar = job.deliveryNumber.charAt(job.deliveryNumber.length - 1);
-      const parsedFileNumber = parseInt(lastChar, 10);
-      if (!isNaN(parsedFileNumber) && parsedFileNumber >= 1 && parsedFileNumber <= 10) {
-        fileNumber = parsedFileNumber;
-      }
+    // Print order summary page FIRST (will appear on top due to stack-based printing)
+    if (job.orderDetails && job.customerInfo) {
+      console.log(`Printing order summary page...`);
+      const orderSummaryPage = await generateOrderSummaryPage(job.orderDetails, job.customerInfo);
+      const orderSummaryPath = path.join(tempDir, `order_summary_${job.deliveryNumber}.pdf`);
+      fs.writeFileSync(orderSummaryPath, orderSummaryPage);
+      await printFile(orderSummaryPath, { ...job.printingOptions, copies: 1 });
+      fs.unlinkSync(orderSummaryPath);
+      console.log(`Order summary page printed successfully`);
     } else {
-      // Fallback to getCurrentFileNumber if delivery number is not available
-      fileNumber = getCurrentFileNumber();
+      console.log(`⏭️ Skipping order summary page (orderDetails or customerInfo not provided)`);
     }
-
-    // Check if we need to print letter separator BEFORE the file (after every 10 files, before file 1 of new letter)
-    if (shouldPrintLetterSeparator()) {
-      const letter = getCurrentLetter();
-      console.log(`Printing letter separator: ${letter}`);
-      const letterPage = await generateLetterSeparator(letter);
-      const letterPagePath = path.join(tempDir, `letter_${letter}_${job.deliveryNumber}.pdf`);
-      fs.writeFileSync(letterPagePath, letterPage);
-      await printFile(letterPagePath, { ...job.printingOptions, copies: 1 });
-      fs.unlinkSync(letterPagePath);
-      console.log(`Letter separator ${letter} printed`);
-    }
-
-    // Print file number page separator BEFORE the file
-    // Only print if it hasn't been printed for this delivery number yet (prevents duplicates on retries)
-    const separatorKey = job.deliveryNumber || job.fileUrl; // Use delivery number or file URL as unique key
-    
-    if (!printedFileNumberSeparators.has(separatorKey)) {
-      console.log(`Printing file number separator: File no: ${fileNumber}...`);
-      const fileNumberPage = await generateFileNumberPage(fileNumber);
-      const fileNumberPagePath = path.join(tempDir, `file_${fileNumber}_${job.deliveryNumber}.pdf`);
-      fs.writeFileSync(fileNumberPagePath, fileNumberPage);
-      await printFile(fileNumberPagePath, { ...job.printingOptions, copies: 1 });
-      fs.unlinkSync(fileNumberPagePath);
-      
-      // Mark this separator as printed to prevent duplicates on retries
-      printedFileNumberSeparators.add(separatorKey);
-      console.log(`File number separator printed: File no: ${fileNumber}`);
-    } else {
-      console.log(`⏭️ Skipping file number separator (already printed for delivery: ${job.deliveryNumber || 'N/A'}) - likely a retry`);
-    }
-
-    // Add a small delay after printing separator to ensure printer is ready
-    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Download file
     const fileExtension = path.extname(job.fileName) || '.pdf';

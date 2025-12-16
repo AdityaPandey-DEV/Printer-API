@@ -67,7 +67,8 @@ router.post('/print', async (req: Request, res: Response) => {
           },
           deliveryNumber,
           orderId: jobData.orderId,
-          customerInfo: jobData.customerInfo
+          customerInfo: jobData.customerInfo,
+          orderDetails: jobData.orderDetails
         };
 
         // Add to queue
@@ -109,7 +110,8 @@ router.post('/print', async (req: Request, res: Response) => {
         },
         deliveryNumber,
         orderId: jobData.orderId,
-        customerInfo: jobData.customerInfo
+        customerInfo: jobData.customerInfo,
+        orderDetails: jobData.orderDetails
       };
 
       // Add to queue

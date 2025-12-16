@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 
 /**
  * Generate a file number page PDF for separator printing
@@ -162,5 +163,176 @@ export function cleanupTempFile(filePath: string): void {
   } catch (error) {
     console.error(`Error cleaning up temp file ${filePath}:`, error);
   }
+}
+
+/**
+ * Generate order summary page PDF
+ * @param orderDetails - Order details object
+ * @param customerInfo - Customer information object
+ */
+export async function generateOrderSummaryPage(
+  orderDetails: {
+    orderType: 'file' | 'template';
+    pageSize: 'A4' | 'A3';
+    color: 'color' | 'bw' | 'mixed';
+    sided: 'single' | 'double';
+    copies: number;
+    pages: number;
+    serviceOptions: Array<{
+      fileName: string;
+      options: string[];
+    }>;
+    totalAmount: number;
+    expectedDelivery: string;
+  },
+  customerInfo: {
+    name: string;
+    email: string;
+    phone: string;
+  }
+): Promise<Buffer> {
+  const pdfDoc = await PDFDocument.create();
+  const page = pdfDoc.addPage([612, 792]); // A4 size
+  const { width, height } = page.getSize();
+  
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  
+  let yPosition = height - 80;
+  const lineHeight = 20;
+  const sectionSpacing = 30;
+  const leftMargin = 50;
+  
+  // Title
+  page.drawText('Order Summary', {
+    x: leftMargin,
+    y: yPosition,
+    size: 24,
+    font: fontBold,
+    color: rgb(0, 0, 0),
+  });
+  
+  yPosition -= 40;
+  
+  // Draw line
+  page.drawLine({
+    start: { x: leftMargin, y: yPosition },
+    end: { x: width - leftMargin, y: yPosition },
+    thickness: 1,
+    color: rgb(0, 0, 0),
+  });
+  
+  yPosition -= sectionSpacing;
+  
+  // Order Summary Section
+  const formatColor = (color: string) => {
+    if (color === 'bw') return 'Black & White';
+    if (color === 'color') return 'Color';
+    if (color === 'mixed') return 'Mixed';
+    return color;
+  };
+  
+  const formatSided = (sided: string) => {
+    if (sided === 'single') return 'Single-sided';
+    if (sided === 'double') return 'Double-sided';
+    return sided;
+  };
+  
+  const formatOrderType = (orderType: string) => {
+    if (orderType === 'file') return 'File Upload';
+    if (orderType === 'template') return 'Template';
+    return orderType;
+  };
+  
+  const orderSummaryLines = [
+    `Order Type: ${formatOrderType(orderDetails.orderType)}`,
+    `Page Size: ${orderDetails.pageSize}`,
+    `Color: ${formatColor(orderDetails.color)}`,
+    `Sided: ${formatSided(orderDetails.sided)}`,
+    `Copies: ${orderDetails.copies}`,
+    `Pages: ${orderDetails.pages}`,
+  ];
+  
+  // Add Service Options
+  if (orderDetails.serviceOptions && orderDetails.serviceOptions.length > 0) {
+    orderSummaryLines.push('Service Options:');
+    orderDetails.serviceOptions.forEach((serviceOption) => {
+      const optionsText = serviceOption.options.length > 0 
+        ? serviceOption.options.join(', ')
+        : 'None';
+      orderSummaryLines.push(`  ${serviceOption.fileName}: ${optionsText}`);
+    });
+  }
+  
+  // Add Total Amount
+  orderSummaryLines.push(`Total Amount: ₹${orderDetails.totalAmount}`);
+  
+  // Add Expected Delivery
+  if (orderDetails.expectedDelivery) {
+    orderSummaryLines.push(`Expected Delivery: ${orderDetails.expectedDelivery}`);
+  }
+  
+  // Draw order summary lines
+  orderSummaryLines.forEach((line) => {
+    if (yPosition < 100) {
+      // If we run out of space, we could add a new page, but for now just stop
+      return;
+    }
+    page.drawText(line, {
+      x: leftMargin,
+      y: yPosition,
+      size: 12,
+      font: line.startsWith('Service Options:') || line.startsWith('  ') ? font : fontBold,
+      color: rgb(0, 0, 0),
+    });
+    yPosition -= lineHeight;
+  });
+  
+  yPosition -= sectionSpacing;
+  
+  // Customer Information Section
+  page.drawText('Customer Information', {
+    x: leftMargin,
+    y: yPosition,
+    size: 18,
+    font: fontBold,
+    color: rgb(0, 0, 0),
+  });
+  
+  yPosition -= 30;
+  
+  // Draw line
+  page.drawLine({
+    start: { x: leftMargin, y: yPosition },
+    end: { x: width - leftMargin, y: yPosition },
+    thickness: 1,
+    color: rgb(0, 0, 0),
+  });
+  
+  yPosition -= sectionSpacing;
+  
+  // Customer details
+  const customerLines = [
+    `Name: ${customerInfo.name}`,
+    `Phone: ${customerInfo.phone}`,
+    `Email: ${customerInfo.email}`,
+  ];
+  
+  customerLines.forEach((line) => {
+    if (yPosition < 50) {
+      return;
+    }
+    page.drawText(line, {
+      x: leftMargin,
+      y: yPosition,
+      size: 12,
+      font: font,
+      color: rgb(0, 0, 0),
+    });
+    yPosition -= lineHeight;
+  });
+  
+  const pdfBytes = await pdfDoc.save();
+  return Buffer.from(pdfBytes);
 }
 
