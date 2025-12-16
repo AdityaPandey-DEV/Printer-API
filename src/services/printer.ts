@@ -1994,7 +1994,7 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
       const orderSummaryPage = await generateOrderSummaryPage(job.orderDetails, job.customerInfo);
       const orderSummaryPath = path.join(tempDir, `order_summary_${job.deliveryNumber}.pdf`);
       fs.writeFileSync(orderSummaryPath, orderSummaryPage);
-      await printFile(orderSummaryPath, { ...job.printingOptions, copies: 1 });
+      await printFile(orderSummaryPath, { ...job.printingOptions, copies: 1, color: 'bw' });
       fs.unlinkSync(orderSummaryPath);
       console.log(`Order summary page printed successfully`);
     } else {
