@@ -529,7 +529,8 @@ async function printPdfWithMixedColorInSequence(
       
       // Print with Chrome (primary), SumatraPDF (fallback), or Windows print spooler (last resort)
       try {
-        await printPdfWithChrome(groupPdfPath, printerName, group.isMonochrome, copies);
+        // Pass groupIndex for unique port calculation
+        await printPdfWithChrome(groupPdfPath, printerName, group.isMonochrome, copies, groupIndex);
       } catch (error: any) {
         console.warn(`⚠️ Chrome failed for group, trying SumatraPDF: ${error.message}`);
         try {
@@ -541,8 +542,12 @@ async function printPdfWithMixedColorInSequence(
       }
       console.log(`✅ Group ${originalGroupNum} printed successfully: Pages ${group.startIndex + 1}-${group.endIndex + 1} (${group.isMonochrome ? 'B&W' : 'Color'})`);
       
-      // Cleanup
-      fs.unlinkSync(groupPdfPath);
+      // Cleanup: Delete file AFTER printing is complete and HTTP server has closed
+      // The printPdfWithChrome function ensures the HTTP server closes before returning
+      if (fs.existsSync(groupPdfPath)) {
+        fs.unlinkSync(groupPdfPath);
+        console.log(`🗑️ Cleaned up group PDF: ${groupPdfPath}`);
+      }
       
       // Small delay between groups to ensure proper sequencing
       if (groupIndex < pageGroups.length - 1) {
@@ -840,14 +845,15 @@ async function setDefaultPrinter(printerName: string): Promise<boolean> {
 }
 
 /**
- * Print PDF using Chrome with --kiosk-printing flag (fastest method, similar to Chrome's built-in printing)
- * This uses Chrome's PDF viewer which prints directly without image rendering
+ * Print PDF using Chrome with print dialog (allows color mode control)
+ * This opens Chrome normally and uses print dialog interaction to set color mode
  */
 async function printPdfWithChrome(
   filePath: string,
   printerName: string,
   isMonochrome: boolean,
-  copies: number
+  copies: number,
+  groupIndex: number = 0
 ): Promise<void> {
   if (process.platform !== 'win32') {
     throw new Error('Chrome printing only works on Windows');
@@ -867,7 +873,7 @@ async function printPdfWithChrome(
   }
 
   try {
-    console.log(`⚡ Using ${browserName} with --kiosk-printing for fastest printing (monochrome=${isMonochrome})`);
+    console.log(`⚡ Using ${browserName} with print dialog for color mode control (monochrome=${isMonochrome})`);
     
     // Force printer driver to appropriate mode BEFORE printing
     if (isMonochrome) {
@@ -883,23 +889,14 @@ async function printPdfWithChrome(
     // Save current default printer
     const originalDefaultPrinter = await getDefaultPrinter();
     
-    // Set target printer as default (required for --kiosk-printing)
+    // Set target printer as default
     console.log(`🖨️ Setting printer as default: ${printerName}`);
     const setDefaultSuccess = await setDefaultPrinter(printerName);
     if (!setDefaultSuccess) {
       console.warn(`⚠️ Could not set printer as default, Chrome will use current default printer`);
     }
     
-    // Convert file path to file:/// URL format
-    const absolutePath = path.resolve(filePath).replace(/\\/g, '/');
-    const fileUrl = `file:///${absolutePath}`;
-    
-    // Build Chrome command with --kiosk-printing flag
-    // --kiosk-printing bypasses print dialog and prints directly to default printer
-    // --disable-gpu helps with headless/automated use
-    // --no-sandbox may be needed in some environments
     const escapedBrowserPath = browserPath.replace(/"/g, '\\"');
-    const escapedFileUrl = fileUrl.replace(/"/g, '\\"');
     
     // Print all copies
     for (let i = 0; i < copies; i++) {
@@ -907,15 +904,18 @@ async function printPdfWithChrome(
         await new Promise(resolve => setTimeout(resolve, 2000)); // Delay between copies
       }
       
+      // Declare server outside try block so it's accessible in catch block
+      let server: http.Server | null = null;
+      
       try {
         // Use a local HTTP server to serve the PDF (avoids local file access restrictions)
-        // Then open it in Chrome with --kiosk-printing and auto-print JavaScript
-        const serverPort = 8765 + i; // Use different port for each copy
+        // Use unique ports for each group and copy: basePort + (groupIndex * 10) + copyIndex
+        const serverPort = 8765 + (groupIndex * 10) + i;
         const fileName = path.basename(filePath);
         const httpUrl = `http://localhost:${serverPort}/${encodeURIComponent(fileName)}`;
         
         // Create a simple HTTP server to serve the PDF
-        const server = http.createServer((req, res) => {
+        server = http.createServer((req, res) => {
           const parsedUrl = url.parse(req.url || '/');
           const requestedFile = decodeURIComponent(parsedUrl.pathname?.substring(1) || '');
           
@@ -962,12 +962,15 @@ async function printPdfWithChrome(
         });
         
         // Start the server
+        if (!server) {
+          throw new Error('Failed to create HTTP server');
+        }
         await new Promise<void>((resolve, reject) => {
-          server.listen(serverPort, 'localhost', () => {
+          server!.listen(serverPort, 'localhost', () => {
             console.log(`📡 Started local HTTP server on port ${serverPort} to serve PDF`);
             resolve();
           });
-          server.on('error', (err: any) => {
+          server!.on('error', (err: any) => {
             if (err.code === 'EADDRINUSE') {
               // Port in use, try next port
               serverPort + 1;
@@ -1008,21 +1011,52 @@ async function printPdfWithChrome(
         const procId = stdout.trim();
         console.log(`   Chrome process started with PID: ${procId}`);
         
+        // Wait a bit for Chrome to fully start before checking
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Verify Chrome is still running (with retry)
+        let chromeStillRunning = false;
+        for (let retry = 0; retry < 3; retry++) {
+          try {
+            const checkProcCmd = `powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Write-Output 'RUNNING' } else { Write-Output 'NOT_RUNNING' }"`;
+            const { stdout: procCheck } = await execAsync(checkProcCmd);
+            chromeStillRunning = procCheck.trim() === 'RUNNING';
+            if (chromeStillRunning) {
+              break;
+            }
+            if (retry < 2) {
+              console.log(`   Chrome process check failed, retrying... (${retry + 1}/3)`);
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+          } catch (checkError) {
+            console.warn(`   ⚠️ Could not check Chrome process status: ${checkError}`);
+            if (retry < 2) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+          }
+        }
+        
+        if (!chromeStillRunning) {
+          console.warn(`   ⚠️ Chrome process ${procId} is not running after launch, cannot send print command`);
+          throw new Error('Chrome process exited immediately after launch');
+        }
+        
         // Wait for PDF to fully load (longer for larger files)
         console.log(`   Waiting ${totalWaitTime} seconds for PDF to load...`);
         await new Promise(resolve => setTimeout(resolve, totalWaitTime * 1000));
         
         // Verify Chrome is still running before attempting to interact
-        let chromeStillRunning = false;
         try {
           const checkProcCmd = `powershell -Command "$proc = Get-Process -Id ${procId} -ErrorAction SilentlyContinue; if ($proc -and -not $proc.HasExited) { Write-Output 'RUNNING' } else { Write-Output 'NOT_RUNNING' }"`;
           const { stdout: procCheck } = await execAsync(checkProcCmd);
           chromeStillRunning = procCheck.trim() === 'RUNNING';
           if (!chromeStillRunning) {
-            console.warn(`   ⚠️ Chrome process ${procId} is not running, cannot send print command`);
+            console.warn(`   ⚠️ Chrome process ${procId} exited while waiting for PDF to load`);
+            throw new Error('Chrome process exited while waiting for PDF to load');
           }
         } catch (checkError) {
-          console.warn(`   ⚠️ Could not check Chrome process status: ${checkError}`);
+          console.warn(`   ⚠️ Could not verify Chrome process status: ${checkError}`);
+          throw new Error('Chrome process verification failed');
         }
         
         // Trigger printing with color mode setting
@@ -1094,14 +1128,33 @@ async function printPdfWithChrome(
         
         // Close the HTTP server and wait for it to close before continuing
         // This ensures the file exists for the entire print operation
-        await new Promise<void>((resolve) => {
-          server.close(() => {
-            console.log(`   HTTP server closed`);
-            resolve();
+        if (server) {
+          await new Promise<void>((resolve) => {
+            server!.close(() => {
+              console.log(`   HTTP server closed`);
+              resolve();
+            });
           });
-        });
+        }
+        
+        // File cleanup happens in the calling function after all operations complete
+        // This ensures the HTTP server has finished serving the file
         
       } catch (error: any) {
+        // Close server even on error
+        if (server) {
+          try {
+            await new Promise<void>((resolve) => {
+              server!.close(() => {
+                console.log(`   HTTP server closed (error cleanup)`);
+                resolve();
+              });
+            });
+          } catch (serverError) {
+            // Ignore server close errors
+          }
+        }
+        
         if (i === 0) {
           throw error;
         }
