@@ -1555,6 +1555,14 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
     }
     
     if (fileExt === '.pdf' || fileExt === '.jpg' || fileExt === '.jpeg' || fileExt === '.png' || fileExt === '.gif' || fileExt === '.bmp') {
+      const isImage =
+        fileExt === '.jpg' ||
+        fileExt === '.jpeg' ||
+        fileExt === '.png' ||
+        fileExt === '.gif' ||
+        fileExt === '.bmp';
+      const isSinglePagePdf = fileExt === '.pdf' && typeof options.pageCount === 'number' && options.pageCount <= 1;
+
       // Handle mixed color printing for PDFs (maintains page sequence)
       if (fileExt === '.pdf' && colorMode === 'mixed') {
         console.log(`🔍 DEBUG - PDF file with mixed color mode detected`);
@@ -1636,8 +1644,37 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
         }
       }
       
-      // Use Chrome with --kiosk-printing as PRIMARY method (fastest, similar to Chrome's built-in printing)
-      // Falls back to SumatraPDF, then Windows print spooler if Chrome is not available
+      // For images and single-page PDFs, prefer SumatraPDF directly (no Chrome) for faster simple jobs
+      if (isImage || isSinglePagePdf) {
+        console.log(
+          `🖨️ Simple job detected (${isImage ? 'image' : 'single-page PDF'}). Using SumatraPDF as primary method: ${filePath}`
+        );
+        console.log(`📋 Options: printer=${printerName}, copies=${copies}, color=${colorMode}, pageSize=${pageSize}, sided=${sided}`);
+
+        try {
+          await printPdfWithSumatra(filePath, printerName, isMonochrome, copies);
+          console.log(`✅ Print job sent successfully using SumatraPDF (simple job)`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return;
+        } catch (sumatraError: any) {
+          console.warn(`⚠️ SumatraPDF failed for simple job: ${sumatraError.message}`);
+          console.log(`🔄 Falling back to Windows print spooler for simple job...`);
+
+          try {
+            await printPdfWithWindowsSpooler(filePath, printerName, isMonochrome, copies);
+            console.log(`✅ Print job sent successfully using Windows print spooler (simple job fallback)`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            return;
+          } catch (spoolerError: any) {
+            console.error(`❌ All print methods failed for simple job`);
+            throw new Error(
+              `Simple job print failed: SumatraPDF: ${sumatraError.message}, Windows spooler: ${spoolerError.message}`
+            );
+          }
+        }
+      }
+
+      // For other multi-page PDFs/images, use Chrome as primary then fall back to SumatraPDF and Windows spooler
       try {
         console.log(`🖨️ Printing ${fileExt} file using Chrome with --kiosk-printing (primary method): ${filePath}`);
         console.log(`📋 Options: printer=${printerName}, copies=${copies}, color=${colorMode}, pageSize=${pageSize}, sided=${sided}`);
@@ -1744,29 +1781,52 @@ async function printFile(filePath: string, options: PrintJob['printingOptions'])
             );
           }
         } else {
-          // Regular PDF printing (not mixed mode) using Chrome (fastest, same as regular PDFs)
-          try {
-            await printPdfWithChrome(pdfPath, printerName, isMonochrome, copies);
-            console.log(`✅ Print job sent successfully using Chrome`);
-          } catch (error: any) {
-            console.warn(`⚠️ Chrome failed: ${error.message}`);
-            console.log(`🔄 Falling back to SumatraPDF...`);
-            
-            // Fallback to SumatraPDF
+          const isSinglePageWord = typeof options.pageCount === 'number' && options.pageCount <= 1;
+
+          if (isSinglePageWord) {
+            console.log(`🖨️ Single-page Word job detected. Using SumatraPDF as primary method on converted PDF: ${pdfPath}`);
             try {
               await printPdfWithSumatra(pdfPath, printerName, isMonochrome, copies);
-              console.log(`✅ Print job sent successfully using SumatraPDF (fallback)`);
+              console.log(`✅ Print job sent successfully using SumatraPDF (single-page Word job)`);
             } catch (sumatraError: any) {
-              console.warn(`⚠️ SumatraPDF failed: ${sumatraError.message}`);
-              console.log(`🔄 Falling back to Windows print spooler...`);
-              
-              // Last resort: Windows print spooler
+              console.warn(`⚠️ SumatraPDF failed for single-page Word job: ${sumatraError.message}`);
+              console.log(`🔄 Falling back to Windows print spooler for single-page Word job...`);
+
               try {
                 await printPdfWithWindowsSpooler(pdfPath, printerName, isMonochrome, copies);
-                console.log(`✅ Print job sent successfully using Windows print spooler (last resort)`);
+                console.log(`✅ Print job sent successfully using Windows print spooler (single-page Word fallback)`);
               } catch (spoolerError: any) {
-                console.error(`❌ All print methods failed`);
-                throw new Error(`Print failed: Chrome: ${error.message}, SumatraPDF: ${sumatraError.message}, Windows spooler: ${spoolerError.message}`);
+                console.error(`❌ All print methods failed for single-page Word job`);
+                throw new Error(
+                  `Single-page Word print failed: SumatraPDF: ${sumatraError.message}, Windows spooler: ${spoolerError.message}`
+                );
+              }
+            }
+          } else {
+            // Regular PDF printing (not mixed mode) using Chrome (fastest, same as regular PDFs)
+            try {
+              await printPdfWithChrome(pdfPath, printerName, isMonochrome, copies);
+              console.log(`✅ Print job sent successfully using Chrome`);
+            } catch (error: any) {
+              console.warn(`⚠️ Chrome failed: ${error.message}`);
+              console.log(`🔄 Falling back to SumatraPDF...`);
+              
+              // Fallback to SumatraPDF
+              try {
+                await printPdfWithSumatra(pdfPath, printerName, isMonochrome, copies);
+                console.log(`✅ Print job sent successfully using SumatraPDF (fallback)`);
+              } catch (sumatraError: any) {
+                console.warn(`⚠️ SumatraPDF failed: ${sumatraError.message}`);
+                console.log(`🔄 Falling back to Windows print spooler...`);
+                
+                // Last resort: Windows print spooler
+                try {
+                  await printPdfWithWindowsSpooler(pdfPath, printerName, isMonochrome, copies);
+                  console.log(`✅ Print job sent successfully using Windows print spooler (last resort)`);
+                } catch (spoolerError: any) {
+                  console.error(`❌ All print methods failed`);
+                  throw new Error(`Print failed: Chrome: ${error.message}, SumatraPDF: ${sumatraError.message}, Windows spooler: ${spoolerError.message}`);
+                }
               }
             }
           }
@@ -1978,6 +2038,40 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     // Download file
     const fileExtension = path.extname(job.fileName) || '.pdf';
     const tempFilePath = path.join(tempDir, `${job.deliveryNumber}${fileExtension}`);
+    const fileExtensionLower = fileExtension.toLowerCase();
+
+    // Determine if this is a simple single-sheet job that should use Sumatra and skip order summary
+    const isImageJob =
+      fileExtensionLower === '.jpg' ||
+      fileExtensionLower === '.jpeg' ||
+      fileExtensionLower === '.png' ||
+      fileExtensionLower === '.gif' ||
+      fileExtensionLower === '.bmp';
+
+    const isPdfOrWordJob =
+      fileExtensionLower === '.pdf' ||
+      fileExtensionLower === '.doc' ||
+      fileExtensionLower === '.docx';
+
+    const pageCountFromOptions = job.printingOptions?.pageCount;
+    const pagesFromOrderDetails = job.orderDetails?.pages;
+
+    const isSinglePageDocJob =
+      isPdfOrWordJob &&
+      ((typeof pageCountFromOptions === 'number' && pageCountFromOptions <= 1) ||
+        (typeof pagesFromOrderDetails === 'number' && pagesFromOrderDetails <= 1));
+
+    const isSimpleSingleSheetJob = isImageJob || isSinglePageDocJob;
+
+    console.log('🔍 Simple single-sheet detection:', {
+      fileExtension: fileExtensionLower,
+      isImageJob,
+      isPdfOrWordJob,
+      pageCountFromOptions,
+      pagesFromOrderDetails,
+      isSinglePageDocJob,
+      isSimpleSingleSheetJob,
+    });
     
     console.log(`Downloading file from ${job.fileUrl}...`);
     await downloadFile(job.fileUrl, tempFilePath);
@@ -1989,14 +2083,18 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     console.log(`File printed successfully`);
 
     // Print order summary page LAST (will appear on top due to stack-based printing - LIFO)
-    if (job.orderDetails && job.customerInfo) {
-      console.log(`Printing order summary page...`);
+    if (job.orderDetails && job.customerInfo && !isSimpleSingleSheetJob) {
+      console.log(`Printing order summary page (non-simple job)...`);
       const orderSummaryPage = await generateOrderSummaryPage(job.orderDetails, job.customerInfo);
       const orderSummaryPath = path.join(tempDir, `order_summary_${job.deliveryNumber}.pdf`);
       fs.writeFileSync(orderSummaryPath, orderSummaryPage);
       await printFile(orderSummaryPath, { ...job.printingOptions, copies: 1 });
       fs.unlinkSync(orderSummaryPath);
       console.log(`Order summary page printed successfully`);
+    } else if (isSimpleSingleSheetJob) {
+      console.log(
+        `⏭️ Skipping order summary page for simple single-sheet job (image or single-page PDF/DOC/DOCX)`
+      );
     } else {
       console.log(`⏭️ Skipping order summary page (orderDetails or customerInfo not provided)`);
       console.log(`   orderDetails: ${job.orderDetails ? 'provided' : 'missing'}`);
