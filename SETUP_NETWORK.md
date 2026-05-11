@@ -1,4 +1,5 @@
-# Network Setup Guide for Printer API
+      
+      # Network Setup Guide for Printer API
 
 ## Problem
 - **funPrinting** runs on Render (cloud) at `https://your-app.onrender.com`

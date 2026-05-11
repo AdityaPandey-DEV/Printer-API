@@ -144,7 +144,26 @@ router.get('/queue/status', async (req: Request, res: Response) => {
     const status = getQueueStatus();
     res.json({
       success: true,
-      ...status
+      total: status.total,
+      pending: status.pending,
+      printing: status.printing,
+      currentJob: status.currentJob ? {
+        id: status.currentJob.id,
+        fileName: status.currentJob.job.fileName,
+        deliveryNumber: status.currentJob.job.deliveryNumber,
+        attempts: status.currentJob.attempts,
+        startedAt: status.currentJob.lastAttemptAt
+      } : null,
+      jobs: status.jobs.map(j => ({
+        id: j.id,
+        fileName: j.job.fileName,
+        deliveryNumber: j.job.deliveryNumber,
+        status: (j as any).status || 'pending',
+        attempts: j.attempts,
+        createdAt: j.createdAt,
+        lastAttemptAt: j.lastAttemptAt,
+        error: (j as any).error
+      }))
     });
   } catch (error) {
     console.error('Error getting queue status:', error);
