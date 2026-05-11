@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import QRCode from 'qrcode';
 
 /**
  * Generate a file number page PDF for separator printing
@@ -166,9 +167,11 @@ export function cleanupTempFile(filePath: string): void {
 }
 
 /**
- * Generate order summary page PDF
+ * Generate order summary page PDF with QR code, Order ID, and Order Time
  * @param orderDetails - Order details object
  * @param customerInfo - Customer information object
+ * @param orderId - The order ID (e.g., ORD123456789)
+ * @param orderTime - The order creation time (ISO string or Date)
  */
 export async function generateOrderSummaryPage(
   orderDetails: {
@@ -189,7 +192,9 @@ export async function generateOrderSummaryPage(
     name: string;
     email: string;
     phone: string;
-  }
+  },
+  orderId?: string,
+  orderTime?: string | Date
 ): Promise<Buffer> {
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([612, 792]); // A4 size
@@ -198,12 +203,59 @@ export async function generateOrderSummaryPage(
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   
-  let yPosition = height - 80;
+  let yPosition = height - 60;
   const lineHeight = 20;
-  const sectionSpacing = 30;
+  const sectionSpacing = 25;
   const leftMargin = 50;
   
-  // Title
+  // ============ QR CODE SECTION (top-right) ============
+  const qrSize = 120;
+  const qrX = width - leftMargin - qrSize;
+  const qrY = height - 60 - qrSize;
+  
+  if (orderId) {
+    try {
+      // Build verification URL
+      const baseUrl = process.env.FUNPRINTING_URL || 'https://www.funprinting.store';
+      const verifyUrl = `${baseUrl}/verify-order/${orderId}`;
+      
+      // Generate QR code as PNG buffer
+      const qrPngBuffer = await QRCode.toBuffer(verifyUrl, {
+        width: qrSize * 2, // Higher resolution for crisp printing
+        margin: 1,
+        errorCorrectionLevel: 'H',
+        color: {
+          dark: '#000000',
+          light: '#ffffff',
+        },
+      });
+      
+      // Embed QR code image in PDF
+      const qrImage = await pdfDoc.embedPng(qrPngBuffer);
+      page.drawImage(qrImage, {
+        x: qrX,
+        y: qrY,
+        width: qrSize,
+        height: qrSize,
+      });
+      
+      // Label below QR code
+      const scanText = 'Scan to verify order';
+      const scanTextWidth = font.widthOfTextAtSize(scanText, 8);
+      page.drawText(scanText, {
+        x: qrX + (qrSize - scanTextWidth) / 2,
+        y: qrY - 12,
+        size: 8,
+        font: font,
+        color: rgb(0.4, 0.4, 0.4),
+      });
+    } catch (qrError) {
+      console.error('Failed to generate QR code for order summary:', qrError);
+      // Continue without QR code
+    }
+  }
+  
+  // ============ TITLE ============
   page.drawText('Order Summary', {
     x: leftMargin,
     y: yPosition,
@@ -212,7 +264,35 @@ export async function generateOrderSummaryPage(
     color: rgb(0, 0, 0),
   });
   
-  yPosition -= 40;
+  yPosition -= 30;
+  
+  // ============ ORDER ID & TIME ============
+  if (orderId) {
+    page.drawText(`Order ID: ${orderId}`, {
+      x: leftMargin,
+      y: yPosition,
+      size: 14,
+      font: fontBold,
+      color: rgb(0.1, 0.1, 0.5),
+    });
+    yPosition -= lineHeight;
+  }
+  
+  if (orderTime) {
+    const timeStr = typeof orderTime === 'string' 
+      ? new Date(orderTime).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })
+      : orderTime.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+    page.drawText(`Order Time: ${timeStr}`, {
+      x: leftMargin,
+      y: yPosition,
+      size: 11,
+      font: font,
+      color: rgb(0.3, 0.3, 0.3),
+    });
+    yPosition -= lineHeight;
+  }
+  
+  yPosition -= 10;
   
   // Draw line
   page.drawLine({
@@ -224,7 +304,7 @@ export async function generateOrderSummaryPage(
   
   yPosition -= sectionSpacing;
   
-  // Order Summary Section
+  // ============ ORDER DETAILS ============
   const formatColor = (color: string) => {
     if (color === 'bw') return 'Black & White';
     if (color === 'color') return 'Color';
@@ -290,7 +370,7 @@ export async function generateOrderSummaryPage(
   
   yPosition -= sectionSpacing;
   
-  // Customer Information Section
+  // ============ CUSTOMER INFORMATION ============
   page.drawText('Customer Information', {
     x: leftMargin,
     y: yPosition,
@@ -335,4 +415,3 @@ export async function generateOrderSummaryPage(
   const pdfBytes = await pdfDoc.save();
   return Buffer.from(pdfBytes);
 }
-

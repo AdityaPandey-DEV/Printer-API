@@ -2085,7 +2085,7 @@ export async function printJob(job: PrintJob, printerIndex: number): Promise<Pri
     // Print order summary page LAST (will appear on top due to stack-based printing - LIFO)
     if (job.orderDetails && job.customerInfo && !isSimpleSingleSheetJob) {
       console.log(`Printing order summary page (non-simple job)...`);
-      const orderSummaryPage = await generateOrderSummaryPage(job.orderDetails, job.customerInfo);
+      const orderSummaryPage = await generateOrderSummaryPage(job.orderDetails, job.customerInfo, job.orderId, new Date().toISOString());
       const orderSummaryPath = path.join(tempDir, `order_summary_${job.deliveryNumber}.pdf`);
       fs.writeFileSync(orderSummaryPath, orderSummaryPage);
       await printFile(orderSummaryPath, { ...job.printingOptions, copies: 1 });
